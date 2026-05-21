@@ -49,5 +49,9 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.</string>
 </dict>
 </plist>

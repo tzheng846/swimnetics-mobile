@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Swimnetics",
+    "slug": "swimnetics",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.swimnetics.app",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.",
+        "NSBluetoothPeripheralUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording."
+      }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "REPLACE_AFTER_EAS_INIT"
+      }
+    }
+  }
+}

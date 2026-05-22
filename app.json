@@ -12,6 +12,12 @@
         "NSBluetoothAlwaysUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.",
         "NSBluetoothPeripheralUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording."
       }
-    }
+    },
+    "extra": {
+      "eas": {
+        "projectId": "db87ba35-184b-4469-a291-559775c12191"
+      }
+    },
+    "owner": "tzheng846"
   }
 }

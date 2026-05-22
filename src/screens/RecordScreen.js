@@ -224,7 +224,7 @@ export default function RecordScreen() {
       log(`Save failed: ${e.message}`, 'error');
       setBleState('error');
     }
-  }, [log, saveCSV]); // uploadAndProcess added via ref to avoid circular dep
+  }, [log, saveCSV]); // uploadAndProcess omitted: it only depends on log (stable [] deps), never recreated
 
   // ── Upload to FastAPI ─────────────────────────────────────────────────────────
   const uploadAndProcess = useCallback(async (filePath) => {
@@ -238,11 +238,15 @@ export default function RecordScreen() {
         type: 'text/csv',
       });
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
       const response = await fetch(`${API_BASE}/process`, {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
         // Do NOT set Content-Type — fetch sets it with the multipart boundary
       });
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const text = await response.text();
@@ -448,8 +452,8 @@ export default function RecordScreen() {
     <SafeAreaView style={styles.container}>
       <Text style={styles.title}>Swimnetics</Text>
 
-      {/* STATUS AREA */}
-      <View style={styles.statusArea}>
+      {/* STATUS AREA — hidden during results to avoid wasting space */}
+      {bleState !== 'results' && <View style={styles.statusArea}>
         {(bleState === 'idle') && (
           <>
             <TouchableOpacity style={styles.primaryBtn} onPress={startScan}>
@@ -529,7 +533,7 @@ export default function RecordScreen() {
             </TouchableOpacity>
           </>
         )}
-      </View>
+      </View>}
 
       {/* RESULTS */}
       {bleState === 'results' && apiResult && (

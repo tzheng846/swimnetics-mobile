@@ -100,10 +100,15 @@ function VelocityChart({ time, velocity }) {
     return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
   }
 
-  // Downsample to max 400 points for performance
+  // Downsample to max 400 points; filter null/NaN (from _clean() in api.py)
   const step = Math.max(1, Math.floor(time.length / 400));
-  const t = time.filter((_, i) => i % step === 0);
-  const v = velocity.filter((_, i) => i % step === 0);
+  const indices = [];
+  for (let i = 0; i < time.length; i += step) {
+    if (velocity[i] != null && !isNaN(velocity[i])) indices.push(i);
+  }
+  if (indices.length < 2) return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
+  const t = indices.map(i => time[i]);
+  const v = indices.map(i => velocity[i]);
 
   const tMin = t[0], tMax = t[t.length - 1];
   const vMin = Math.min(...v), vMax = Math.max(...v);
@@ -412,7 +417,8 @@ export default function RecordScreen() {
         log(`START write failed: ${e.message} — continuing anyway`, 'warn');
       }
 
-      // Watch for unexpected disconnect
+      // Replace idle watcher with recording watcher — remove old before registering new
+      disconnectRef.current?.remove();
       disconnectRef.current = deviceRef.current.onDisconnected((error) => {
         log(`Device disconnected${error ? ': ' + error.message : ''}`, 'warn');
         stopRecording(true);

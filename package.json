@@ -5,6 +5,7 @@
   "dependencies": {
     "buffer": "^6.0.3",
     "expo": "~56.0.3",
+    "expo-dev-client": "^56.0.14",
     "expo-status-bar": "~56.0.4",
     "fetch-nodeshim": "^0.4.10",
     "react": "19.2.3",

@@ -3,11 +3,13 @@
   "version": "1.0.0",
   "main": "index.js",
   "dependencies": {
+    "buffer": "^6.0.3",
     "expo": "~56.0.3",
     "expo-status-bar": "~56.0.4",
     "fetch-nodeshim": "^0.4.10",
     "react": "19.2.3",
-    "react-native": "0.85.3"
+    "react-native": "0.85.3",
+    "react-native-ble-plx": "^3.5.1"
   },
   "publishConfig": {
     "executableFiles": [

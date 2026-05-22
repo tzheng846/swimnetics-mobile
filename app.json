@@ -3,6 +3,7 @@
     "name": "Swimnetics",
     "slug": "swimnetics",
     "version": "1.0.0",
+    "scheme": "swimnetics",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {

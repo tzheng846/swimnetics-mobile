@@ -334,6 +334,16 @@ export default function RecordScreen() {
       if (!rxFound)  log('WARNING: NUS RX characteristic NOT found!', 'warn');
 
       deviceRef.current = device;
+
+      // Watch for unexpected disconnects while in connected/results state
+      disconnectRef.current = device.onDisconnected(() => {
+        log('SwimLogger disconnected unexpectedly', 'warn');
+        disconnectRef.current = null;
+        deviceRef.current = null;
+        setDevices([]);
+        setBleState('idle'); // go to idle so user can rescan
+      });
+
       setBleState('connected');
     } catch (e) {
       log(`Connection failed: ${e.message}`, 'error');
@@ -413,27 +423,41 @@ export default function RecordScreen() {
   }, [log, stopRecording]);
 
   // ── Reset ─────────────────────────────────────────────────────────────────────
-  const reset = useCallback(() => {
-    // Clean up any live BLE subscriptions before wiping refs
+  const reset = useCallback(async () => {
+    // Clean up any active recording subscriptions (already null after stopRecording,
+    // but guard in case reset is called from an unexpected state)
     subscriptionRef.current?.remove();
     subscriptionRef.current = null;
     disconnectRef.current?.remove();
     disconnectRef.current = null;
-    // Explicitly disconnect so SwimLogger is discoverable on next scan
+
+    // Check if the BLE connection is still alive — stay connected if so
+    let stillConnected = false;
     if (deviceRef.current) {
-      deviceRef.current.cancelConnection().catch(() => {});
+      try {
+        stillConnected = await deviceRef.current.isConnected();
+      } catch (_) {}
     }
-    deviceRef.current = null;
+
     samplesRef.current = [];
     isStoppingRef.current = false;
     firstPacketRef.current = false;
-    setDevices([]);
     setSampleCount(0);
     setSavedPath(null);
     setSavedCount(0);
     setApiResult(null);
-    setBleState('idle');
-    log('--- Reset ---');
+
+    if (stillConnected) {
+      // Device still connected — go straight to connected state, skip scan
+      log('--- Reset (device still connected) ---');
+      setBleState('connected');
+    } else {
+      // Connection dropped — go to idle so user can rescan
+      deviceRef.current = null;
+      setDevices([]);
+      log('--- Reset (device disconnected, scan to reconnect) ---');
+      setBleState('idle');
+    }
   }, [log]);
 
   // ── Debug log color ───────────────────────────────────────────────────────────

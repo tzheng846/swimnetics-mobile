@@ -25,5 +25,12 @@
         "resourceClass": "m-medium"
       }
     }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "6772050809"
+      }
+    }
   }
 }

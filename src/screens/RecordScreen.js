@@ -355,6 +355,7 @@ export default function RecordScreen() {
   const startRecording = useCallback(async () => {
     samplesRef.current = [];
     firstPacketRef.current = false;
+    isStoppingRef.current = false; // safety reset — ensures Stop works on every session
     setSampleCount(0);
     setSavedPath(null);
     setBleState('recording');
@@ -372,8 +373,9 @@ export default function RecordScreen() {
               log(`Subscription cancelled (expected on stop)`, 'warn');
               return;
             }
+            // Log other errors but do NOT auto-stop — avoids spurious double-stop.
+            // The disconnect watcher handles true device disconnections.
             log(`Notification error: ${error.message} (code: ${error.errorCode})`, 'error');
-            stopRecording(true);
             return;
           }
 

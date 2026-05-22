@@ -227,33 +227,26 @@ export default function RecordScreen() {
   }, [log, saveCSV]); // uploadAndProcess omitted: it only depends on log (stable [] deps), never recreated
 
   // ── Upload to FastAPI ─────────────────────────────────────────────────────────
+  // Uses FileSystem.uploadAsync (native multipart) instead of fetch + FormData
+  // because RN 0.85/Hermes rejects the {uri, name, type} FormData pattern with
+  // "Unsupported FormData implementation".
   const uploadAndProcess = useCallback(async (filePath) => {
     log(`Uploading to ${API_BASE}/process...`);
     setBleState('uploading');
     try {
-      const formData = new FormData();
-      formData.append('file', {
-        uri: filePath,
-        name: filePath.split('/').pop(),
-        type: 'text/csv',
+      const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
+        httpMethod: 'POST',
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: 'file',
+        mimeType: 'text/csv',
+        headers: {},
       });
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 30000);
-      const response = await fetch(`${API_BASE}/process`, {
-        method: 'POST',
-        body: formData,
-        signal: controller.signal,
-        // Do NOT set Content-Type — fetch sets it with the multipart boundary
-      });
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`API ${response.status}: ${text.slice(0, 120)}`);
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(`API ${result.status}: ${result.body.slice(0, 120)}`);
       }
 
-      const data = await response.json();
+      const data = JSON.parse(result.body);
       log(`Upload complete. Stroke rate: ${data.session?.stroke_rate_spm?.toFixed(1)} SPM`, 'ok');
       setApiResult(data);
       setBleState('results');

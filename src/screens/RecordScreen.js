@@ -419,6 +419,10 @@ export default function RecordScreen() {
     subscriptionRef.current = null;
     disconnectRef.current?.remove();
     disconnectRef.current = null;
+    // Explicitly disconnect so SwimLogger is discoverable on next scan
+    if (deviceRef.current) {
+      deviceRef.current.cancelConnection().catch(() => {});
+    }
     deviceRef.current = null;
     samplesRef.current = [];
     isStoppingRef.current = false;

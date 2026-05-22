@@ -79,15 +79,18 @@ export default function RecordScreen() {
     disconnectSubRef.current?.remove();
     disconnectSubRef.current = null;
 
-    // Send STOP command (best-effort)
+    // Send STOP command with timeout so it cannot hang
     try {
       if (deviceRef.current) {
-        await deviceRef.current.writeCharacteristicWithoutResponseForService(
-          NUS_SERVICE, NUS_RX_CHAR,
-          Buffer.from('STOP\n').toString('base64'),
-        );
+        await Promise.race([
+          deviceRef.current.writeCharacteristicWithoutResponseForService(
+            NUS_SERVICE, NUS_RX_CHAR,
+            Buffer.from('STOP\n').toString('base64'),
+          ),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+        ]);
       }
-    } catch (_) { /* ignore — device may have disconnected */ }
+    } catch (_) { /* best-effort — continue regardless */ }
 
     setBleState('saving');
 
@@ -103,17 +106,6 @@ export default function RecordScreen() {
       setBleState('error');
     }
   }, [saveCSV]);
-
-  // ── BLE data callback ──────────────────────────────────────────────────────
-  const onData = useCallback((error, characteristic) => {
-    if (error) {
-      stopRecording(true);
-      return;
-    }
-    const samples = parsePacket(characteristic.value);
-    samplesRef.current.push(...samples);
-    setSampleCount(c => c + samples.length);
-  }, [stopRecording]);
 
   // ── Scan ───────────────────────────────────────────────────────────────────
   const startScan = useCallback(() => {
@@ -166,28 +158,45 @@ export default function RecordScreen() {
     setErrorMsg(null);
 
     try {
-      // Send START command
-      await deviceRef.current.writeCharacteristicWithoutResponseForService(
-        NUS_SERVICE, NUS_RX_CHAR,
-        Buffer.from('START\n').toString('base64'),
+      // Subscribe to notifications FIRST — device may start streaming immediately
+      subscriptionRef.current = deviceRef.current.monitorCharacteristicForService(
+        NUS_SERVICE, NUS_TX_CHAR,
+        (error, characteristic) => {
+          if (error) {
+            // Surface the actual error for debugging
+            Alert.alert('BLE Error', error.message || String(error));
+            stopRecording(true);
+            return;
+          }
+          const samples = parsePacket(characteristic.value);
+          samplesRef.current.push(...samples);
+          setSampleCount(c => c + samples.length);
+        },
       );
 
-      // Subscribe to notifications
-      subscriptionRef.current = deviceRef.current.monitorCharacteristicForService(
-        NUS_SERVICE, NUS_TX_CHAR, onData,
-      );
+      // Send START command (best-effort — some firmware needs it, some don't)
+      try {
+        await Promise.race([
+          deviceRef.current.writeCharacteristicWithoutResponseForService(
+            NUS_SERVICE, NUS_RX_CHAR,
+            Buffer.from('START\n').toString('base64'),
+          ),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 1500)),
+        ]);
+      } catch (_) { /* ignore — device streams without START on some firmware */ }
 
       // Handle unexpected disconnect
-      disconnectSubRef.current = deviceRef.current.onDisconnected((error) => {
-        if (error) stopRecording(true);
+      disconnectSubRef.current = deviceRef.current.onDisconnected(() => {
+        stopRecording(true);
       });
 
       setBleState('recording');
     } catch (e) {
+      Alert.alert('Start failed', e.message || String(e));
       setBleState('error');
       setErrorMsg(`Failed to start: ${e.message}`);
     }
-  }, [onData, stopRecording]);
+  }, [stopRecording]);
 
   // ── Reset ──────────────────────────────────────────────────────────────────
   const reset = useCallback(() => {

@@ -5,12 +5,14 @@
   "build": {
     "preview": {
       "distribution": "store",
+      "autoIncrement": true,
       "ios": {
         "resourceClass": "m-medium"
       }
     },
     "production": {
       "distribution": "store",
+      "autoIncrement": true,
       "ios": {
         "resourceClass": "m-medium"
       }

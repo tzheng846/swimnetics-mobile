@@ -55,5 +55,7 @@
 	<string>Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 </dict>
 </plist>

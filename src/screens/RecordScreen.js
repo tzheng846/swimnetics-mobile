@@ -1,10 +1,3 @@
-/**
- * RecordScreen — BLE recording with full debug logging
- *
- * Debug log panel shows step-by-step status so we can pinpoint
- * exactly where the BLE pipeline fails.
- */
-
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList,
@@ -16,6 +9,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Buffer } from 'buffer';
 import Svg, { Polyline, Line, Text as SvgText } from 'react-native-svg';
 import { API_BASE } from '../config';
+import { useAuth } from '../context/AuthContext';
 
 // ── BLE constants ─────────────────────────────────────────────────────────────
 const NUS_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
@@ -50,44 +44,6 @@ function parsePacket(base64) {
     magnet_ok: buf.readUInt8(offset + 6),
   }));
   return { samples, error: null };
-}
-
-// ── Self-test: run on mount to verify parser and imports are working ───────────
-function runSelfTests() {
-  const results = [];
-
-  // Test 1: parser with valid 14-byte packet
-  const buf = Buffer.alloc(14);
-  buf.writeUInt32LE(1000000, 0); buf.writeUInt16LE(2048, 4); buf.writeUInt8(1, 6);
-  buf.writeUInt32LE(1000037, 7); buf.writeUInt16LE(2049, 11); buf.writeUInt8(1, 13);
-  const { samples, error } = parsePacket(buf.toString('base64'));
-  if (error || samples.length !== 2 || samples[0].timestamp_us !== 1000000) {
-    results.push(`FAIL parsePacket(valid): ${error || 'wrong output'}`);
-  } else {
-    results.push('PASS parsePacket(valid 14-byte) → 2 samples');
-  }
-
-  // Test 2: parser rejects wrong length
-  const { error: err2 } = parsePacket(Buffer.alloc(7).toString('base64'));
-  if (!err2) results.push('FAIL parsePacket(7-byte): should have returned error');
-  else results.push('PASS parsePacket(7-byte) → rejects with error');
-
-  // Test 3: FileSystem legacy import
-  try {
-    if (typeof FileSystem.writeAsStringAsync !== 'function') throw new Error('not a function');
-    results.push('PASS FileSystem.writeAsStringAsync is available');
-  } catch (e) {
-    results.push(`FAIL FileSystem: ${e.message}`);
-  }
-
-  // Test 4: Buffer base64 round-trip
-  const original = 'Hello SwimLogger';
-  const encoded = Buffer.from(original).toString('base64');
-  const decoded = Buffer.from(encoded, 'base64').toString();
-  if (decoded !== original) results.push('FAIL Buffer round-trip');
-  else results.push('PASS Buffer base64 round-trip');
-
-  return results;
 }
 
 // ── Velocity chart ────────────────────────────────────────────────────────────
@@ -133,34 +89,28 @@ function VelocityChart({ time, velocity }) {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function RecordScreen() {
+export default function RecordScreen({ route, navigation }) {
+  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0 } = route?.params ?? {};
+  const { session, signOut } = useAuth();
+  const sessionRef = useRef(session);
+  useEffect(() => { sessionRef.current = session; }, [session]);
+
   const [bleState, setBleState] = useState('idle');
   const [devices, setDevices]   = useState([]);
   const [sampleCount, setSampleCount] = useState(0);
   const [savedPath, setSavedPath]     = useState(null);
-  const [savedCount, setSavedCount]   = useState(0);
-  const [debugLog, setDebugLog]       = useState([]);
   const [apiResult, setApiResult]     = useState(null);
-
   const deviceRef      = useRef(null);
   const subscriptionRef = useRef(null);
   const disconnectRef   = useRef(null);
   const samplesRef      = useRef([]);
   const scanTimerRef    = useRef(null);
   const firstPacketRef  = useRef(false);
-  const isStoppingRef   = useRef(false); // guard against double-stop
+  const isStoppingRef   = useRef(false);
 
   const log = useCallback((msg, level = 'info') => {
-    const ts = new Date().toLocaleTimeString();
-    setDebugLog(prev => [...prev, { ts, msg, level }]);
     console.log(`[${level.toUpperCase()}] ${msg}`);
   }, []);
-
-  // Run self-tests on mount
-  useEffect(() => {
-    const results = runSelfTests();
-    results.forEach(r => log(r, r.startsWith('FAIL') ? 'error' : 'ok'));
-  }, [log]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -217,9 +167,8 @@ export default function RecordScreen() {
     log(`Captured ${captured.length} total samples`);
 
     try {
-      const { path, count } = await saveCSV(captured);
+      const { path } = await saveCSV(captured);
       setSavedPath(path);
-      setSavedCount(count);
       if (isError) {
         setBleState('error');
       } else {
@@ -229,22 +178,29 @@ export default function RecordScreen() {
       log(`Save failed: ${e.message}`, 'error');
       setBleState('error');
     }
-  }, [log, saveCSV]); // uploadAndProcess omitted: it only depends on log (stable [] deps), never recreated
+  }, [log, saveCSV]);
 
   // ── Upload to FastAPI ─────────────────────────────────────────────────────────
   // Uses FileSystem.uploadAsync (native multipart) instead of fetch + FormData
   // because RN 0.85/Hermes rejects the {uri, name, type} FormData pattern with
   // "Unsupported FormData implementation".
   const uploadAndProcess = useCallback(async (filePath) => {
-    log(`Uploading to ${API_BASE}/process...`);
     setBleState('uploading');
+    log(`Uploading — athlete_id: ${athleteId ?? 'none'}, head_waist_m: ${headWaistM}`);
     try {
+      const authHeaders = sessionRef.current?.access_token
+        ? { Authorization: `Bearer ${sessionRef.current.access_token}` }
+        : {};
+      const parameters = { head_waist_m: String(headWaistM) };
+      if (athleteId) parameters.athlete_id = String(athleteId);
+
       const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
         httpMethod: 'POST',
         uploadType: FileSystem.FileSystemUploadType.MULTIPART,
         fieldName: 'file',
         mimeType: 'text/csv',
-        headers: {},
+        headers: authHeaders,
+        parameters,
       });
 
       if (result.status < 200 || result.status >= 300) {
@@ -255,11 +211,27 @@ export default function RecordScreen() {
       log(`Upload complete. Stroke rate: ${data.session?.stroke_rate_spm?.toFixed(1)} SPM`, 'ok');
       setApiResult(data);
       setBleState('results');
+
+      // Re-register disconnect watcher for results state.
+      // stopRecording() clears disconnectRef, so without this the device can
+      // disconnect silently (firmware idle timeout after STOP) and the UI
+      // stays stale until the user taps "Record Again".
+      if (deviceRef.current) {
+        disconnectRef.current?.remove();
+        disconnectRef.current = deviceRef.current.onDisconnected(() => {
+          disconnectRef.current = null;
+          deviceRef.current = null;
+          setDevices([]);
+          log('Device disconnected — session saved. Tap "Record Again" to rescan.', 'warn');
+          setBleState('idle');
+        });
+      }
+
     } catch (e) {
       log(`Upload failed: ${e.message}`, 'error');
       setBleState('error');
     }
-  }, [log]);
+  }, [log, athleteId, headWaistM]);
 
   // ── Scan ──────────────────────────────────────────────────────────────────────
   const startScan = useCallback(() => {
@@ -452,7 +424,6 @@ export default function RecordScreen() {
     firstPacketRef.current = false;
     setSampleCount(0);
     setSavedPath(null);
-    setSavedCount(0);
     setApiResult(null);
 
     if (stillConnected) {
@@ -468,19 +439,23 @@ export default function RecordScreen() {
     }
   }, [log]);
 
-  // ── Debug log color ───────────────────────────────────────────────────────────
-  const logColor = (level) => {
-    if (level === 'error') return '#C0392B';
-    if (level === 'warn')  return '#E67E22';
-    if (level === 'ok')    return '#27AE60';
-    return '#555';
-  };
-
-  // ── Render ────────────────────────────────────────────────────────────────────
+// ── Render ────────────────────────────────────────────────────────────────────
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.title}>Swimnetics</Text>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => navigation.goBack()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Text style={styles.backText}>‹ Athletes</Text>
+        </TouchableOpacity>
+        <View style={styles.headerCenter}>
+          <Text style={styles.title}>Swimnetics</Text>
+          {athleteName ? <Text style={styles.athleteLabel}>{athleteName}</Text> : null}
+        </View>
+        <TouchableOpacity onPress={signOut}>
+          <Text style={styles.signOutText}>Sign Out</Text>
+        </TouchableOpacity>
+      </View>
 
+      <View style={{ flex: 1 }}>
       {/* STATUS AREA — hidden during results to avoid wasting space */}
       {bleState !== 'results' && <View style={styles.statusArea}>
         {(bleState === 'idle') && (
@@ -554,7 +529,7 @@ export default function RecordScreen() {
         {bleState === 'error' && (
           <>
             <Text style={[styles.statusText, { color: '#C0392B', marginBottom: 4 }]}>
-              ⚠ Error — see log below
+              ⚠ Recording error
             </Text>
             {savedPath && <Text style={styles.pathText}>{savedPath.split('/').pop()}</Text>}
             <TouchableOpacity style={styles.primaryBtn} onPress={reset}>
@@ -566,48 +541,175 @@ export default function RecordScreen() {
 
       {/* RESULTS */}
       {bleState === 'results' && apiResult && (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 24, paddingBottom: 16 }}>
-          <View style={styles.metricsGrid}>
-            {[
-              ['Stroke Rate', apiResult.session?.stroke_rate_spm?.toFixed(1) ?? '--', 'SPM'],
-              ['Avg Speed',   apiResult.session?.mean_vel_ms?.toFixed(2)      ?? '--', 'm/s'],
-              ['Distance',    apiResult.session?.total_dist_m?.toFixed(1)     ?? '--', 'm'],
-              ['Fatigue',     apiResult.session?.fatigue_index_pct?.toFixed(1) ?? '--', '%'],
-            ].map(([label, value, unit]) => (
-              <View key={label} style={styles.metricCard}>
-                <Text style={styles.metricLabel}>{label}</Text>
-                <Text style={styles.metricValue}>{value}</Text>
-                <Text style={styles.metricUnit}>{unit}</Text>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 20, paddingBottom: 24 }}>
+
+          {/* ── Dive / Pulldown ── */}
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Start Phase</Text>
+            {apiResult.initial_phase?.dive_detected ? (
+              <View style={styles.metricRow}>
+                <MetricItem label="Dive Duration" value={apiResult.initial_phase.dive_duration_s?.toFixed(2)} unit="s" />
+                <MetricItem label="Pulldown Peak" value={apiResult.initial_phase.pulldown_peak_vel_ms?.toFixed(2)} unit="m/s" />
+                <MetricItem label="Pulldown Time" value={apiResult.initial_phase.pulldown_duration_s?.toFixed(2)} unit="s" />
               </View>
-            ))}
+            ) : (
+              <Text style={styles.noDetectText}>
+                {apiResult.initial_phase?.pulldown_detected
+                  ? 'Pulldown detected — no dive surge'
+                  : 'Wall start — no dive or pulldown'}
+              </Text>
+            )}
           </View>
+
+          {/* ── Session ── */}
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Session</Text>
+            <View style={styles.metricRow}>
+              <MetricItem label="Lap Time"     value={apiResult.session?.lap_time_s?.toFixed(2)}          unit="s" />
+              <MetricItem label="Distance"     value={apiResult.session?.total_dist_m?.toFixed(1)}         unit="m" />
+              <MetricItem label="Stroke Rate"  value={apiResult.session?.stroke_rate_spm?.toFixed(1)}      unit="SPM" />
+            </View>
+            <View style={styles.metricRow}>
+              <MetricItem label="Strokes"      value={apiResult.session?.stroke_count}                     unit="" />
+              <MetricItem label="Avg Speed"    value={apiResult.session?.mean_vel_ms?.toFixed(2)}           unit="m/s" />
+              <MetricItem label="Max Speed"    value={apiResult.session?.max_vel_ms?.toFixed(2)}            unit="m/s" />
+            </View>
+          </View>
+
+          {/* ── Efficiency ── */}
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Efficiency</Text>
+            <View style={styles.metricRow}>
+              <MetricItem label="Dist/Stroke"  value={apiResult.session?.mean_dps_m?.toFixed(2)}                       unit="m" />
+              <MetricItem label="Impulse"      value={apiResult.session?.mean_impulse_m?.toFixed(2)}                    unit="m" />
+              <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
+            </View>
+            <View style={styles.metricRow}>
+              <MetricItem label="ISI CV"       value={apiResult.session?.cv_isi != null ? (apiResult.session.cv_isi * 100).toFixed(1) : null}             unit="%" />
+              <MetricItem label="Arm Peak CV"  value={apiResult.session?.cv_arm_peak_vel != null ? (apiResult.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
+              <MetricItem label="Fatigue"      value={apiResult.session?.fatigue_index_pct?.toFixed(1)}                unit="%" />
+            </View>
+          </View>
+
+          {/* ── Velocity Chart ── */}
           <Text style={styles.chartTitle}>Velocity</Text>
           <VelocityChart time={apiResult.time} velocity={apiResult.velocity} />
-          <TouchableOpacity style={[styles.primaryBtn, { marginTop: 20, marginBottom: 8 }]} onPress={reset}>
+
+          {/* ── Time to Distance ── */}
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Time to Distance</Text>
+            <TimeToX
+              timeArr={apiResult.time}
+              distArr={apiResult.distance}
+              baselineEndS={apiResult.session?.baseline_end_s}
+              headWaistM={headWaistM}
+            />
+          </View>
+
+          {/* ── Save status ── */}
+          <Text style={[styles.saveStatus, apiResult.athlete_id_received ? styles.saveOk : styles.saveWarn]}>
+            {apiResult.athlete_id_received
+              ? apiResult.session_save_error
+                ? `⚠ Save failed: ${apiResult.session_save_error}`
+                : '✓ Session saved to cloud'
+              : '⚠ No athlete linked — session not saved'}
+          </Text>
+
+          <TouchableOpacity style={[styles.primaryBtn, { marginTop: 8 }]} onPress={reset}>
             <Text style={styles.btnText}>Record Again</Text>
           </TouchableOpacity>
+
         </ScrollView>
       )}
-
-      {/* DEBUG LOG */}
-      <View style={styles.logContainer}>
-        <Text style={styles.logHeader}>Debug Log</Text>
-        <ScrollView style={styles.logScroll} ref={r => r?.scrollToEnd({ animated: true })}>
-          {debugLog.map((entry, i) => (
-            <Text key={i} style={[styles.logLine, { color: logColor(entry.level) }]}>
-              {entry.ts} {entry.msg}
-            </Text>
-          ))}
-        </ScrollView>
       </View>
+
     </SafeAreaView>
+  );
+}
+
+// ── MetricItem ─────────────────────────────────────────────────────────────────
+function MetricItem({ label, value, unit }) {
+  return (
+    <View style={{ alignItems: 'center', flex: 1 }}>
+      <Text style={styles.metricLabel}>{label}</Text>
+      <Text style={styles.metricValue}>{value ?? '--'}</Text>
+      {unit ? <Text style={styles.metricUnit}>{unit}</Text> : null}
+    </View>
+  );
+}
+
+// ── TimeToX ───────────────────────────────────────────────────────────────────
+const ALL_PRESETS = [1, 2, 3, 5, 10, 15, 20, 25];
+
+function computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetM) {
+  if (!timeArr?.length || !distArr?.length || baselineEndS == null) return null;
+  const baseIdx = timeArr.findIndex(t => t >= baselineEndS);
+  if (baseIdx < 0) return null;
+  const distBase = distArr[baseIdx];
+  const waistTarget = targetM - (headWaistM || 0);
+  if (waistTarget <= 0) return null;
+  const crossIdx = distArr.findIndex((d, i) => i >= baseIdx && d != null && d >= distBase + waistTarget);
+  if (crossIdx < 0) return null;
+  return parseFloat((timeArr[crossIdx] - timeArr[baseIdx]).toFixed(2));
+}
+
+function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0 }) {
+  const { presets, maxReachableM } = React.useMemo(() => {
+    if (!timeArr?.length || !distArr?.length || baselineEndS == null) {
+      return { presets: ALL_PRESETS, maxReachableM: null };
+    }
+    const baseIdx = timeArr.findIndex(t => t >= baselineEndS);
+    if (baseIdx < 0) return { presets: ALL_PRESETS, maxReachableM: null };
+    const distBase = distArr[baseIdx] ?? 0;
+    const distMax = distArr[distArr.length - 1] ?? 0;
+    const maxM = Math.max(0, distMax - distBase - (headWaistM || 0));
+    const visible = ALL_PRESETS.filter(p => p <= Math.ceil(maxM) + 1);
+    return { presets: visible.length > 0 ? visible : ALL_PRESETS, maxReachableM: maxM };
+  }, [timeArr, distArr, baselineEndS, headWaistM]);
+
+  const defaultTarget = presets[Math.min(presets.length - 1, presets.findIndex(p => p >= 5) >= 0 ? presets.findIndex(p => p >= 5) : presets.length - 1)];
+  const [targetM, setTargetM] = React.useState(defaultTarget);
+
+  React.useEffect(() => {
+    if (!presets.includes(targetM)) setTargetM(presets[presets.length - 1]);
+  }, [presets]);
+
+  const timeToX = React.useMemo(
+    () => computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetM),
+    [timeArr, distArr, baselineEndS, headWaistM, targetM]
+  );
+
+  return (
+    <View style={{ alignItems: 'center' }}>
+      <Text style={styles.ttxValue}>{timeToX != null ? `${timeToX} s` : '--'}</Text>
+      <Text style={styles.ttxLabel}>to {targetM} m</Text>
+      {maxReachableM != null && (
+        <Text style={styles.ttxMax}>Max from start: {maxReachableM.toFixed(1)} m</Text>
+      )}
+      <View style={styles.ttxButtons}>
+        {presets.map(p => (
+          <TouchableOpacity
+            key={p}
+            style={[styles.ttxBtn, targetM === p && styles.ttxBtnActive]}
+            onPress={() => setTargetM(p)}
+          >
+            <Text style={[styles.ttxBtnText, targetM === p && styles.ttxBtnTextActive]}>{p}m</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
   );
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
   container:    { flex: 1, backgroundColor: '#F5F7FA' },
-  title:        { fontSize: 24, fontWeight: '700', color: '#1E3A5F', textAlign: 'center', marginTop: 16, marginBottom: 8 },
+  header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 8 },
+  headerCenter: { flex: 1, alignItems: 'center' },
+  title:        { fontSize: 22, fontWeight: '700', color: '#1E3A5F' },
+  backText:     { fontSize: 14, color: '#2196F3' },
+  signOutText:  { fontSize: 13, color: '#888' },
+  athleteLabel: { fontSize: 13, color: '#2196F3', marginTop: 2, textAlign: 'center' },
   statusArea:   { alignItems: 'center', paddingHorizontal: 24, minHeight: 160 },
   row:          { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
   primaryBtn:   { backgroundColor: '#1E3A5F', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12 },
@@ -620,14 +722,23 @@ const styles = StyleSheet.create({
   counterLabel: { fontSize: 14, color: '#7F8C8D', marginTop: 20 },
   counter:      { fontSize: 56, fontWeight: '700', color: '#1E3A5F' },
   pathText:     { fontSize: 12, color: '#95A5A6', marginTop: 4, textAlign: 'center' },
-  metricsGrid:  { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginTop: 8 },
-  metricCard:   { width: '48%', backgroundColor: '#FFF', borderRadius: 10, padding: 12, marginBottom: 8, alignItems: 'center' },
+  sectionCard:  { backgroundColor: '#FFF', borderRadius: 12, padding: 14, marginBottom: 10 },
+  sectionTitle: { fontSize: 11, color: '#7F8C8D', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  metricRow:    { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
   metricLabel:  { fontSize: 11, color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 0.5 },
-  metricValue:  { fontSize: 28, fontWeight: '700', color: '#1E3A5F', marginTop: 2 },
-  metricUnit:   { fontSize: 12, color: '#95A5A6' },
-  chartTitle:   { fontSize: 13, fontWeight: '600', color: '#7F8C8D', marginTop: 8, textTransform: 'uppercase' },
-  logContainer: { flex: 1, marginHorizontal: 12, marginBottom: 8, backgroundColor: '#1A1A2E', borderRadius: 10, padding: 8 },
-  logHeader:    { color: '#7F8C8D', fontSize: 11, fontWeight: '600', marginBottom: 4, textTransform: 'uppercase' },
-  logScroll:    { flex: 1 },
-  logLine:      { fontSize: 11, fontFamily: 'monospace', lineHeight: 18 },
+  metricValue:  { fontSize: 22, fontWeight: '700', color: '#1E3A5F', marginTop: 2 },
+  metricUnit:   { fontSize: 11, color: '#95A5A6' },
+  chartTitle:   { fontSize: 11, fontWeight: '600', color: '#7F8C8D', marginTop: 4, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 },
+  ttxValue:     { fontSize: 42, fontWeight: '700', color: '#1E3A5F' },
+  ttxLabel:     { fontSize: 14, color: '#7F8C8D', marginBottom: 4 },
+  ttxMax:       { fontSize: 11, color: '#B0B8C4', marginBottom: 12 },
+  ttxButtons:   { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 4 },
+  ttxBtn:       { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#F0F2F5', borderWidth: 1, borderColor: '#E0E4EA' },
+  ttxBtnActive: { backgroundColor: '#1E3A5F', borderColor: '#1E3A5F' },
+  ttxBtnText:   { fontSize: 14, fontWeight: '600', color: '#7F8C8D' },
+  ttxBtnTextActive: { color: '#FFF' },
+  noDetectText: { fontSize: 13, color: '#95A5A6', fontStyle: 'italic', marginTop: 2 },
+  saveStatus:   { fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 4 },
+  saveOk:       { color: '#27AE60' },
+  saveWarn:     { color: '#E67E22' },
 });

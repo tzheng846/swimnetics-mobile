@@ -1,30 +1,31 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, TouchableOpacity, FlatList,
+  View, Text, TouchableOpacity,
   ActivityIndicator, SafeAreaView, StyleSheet,
-  ScrollView, Dimensions,
+  ScrollView, Alert,
 } from 'react-native';
-import { BleManager } from 'react-native-ble-plx';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Buffer } from 'buffer';
-import Svg, { Polyline, Line, Text as SvgText } from 'react-native-svg';
+import VelocityChart from '../components/VelocityChart';
 import { API_BASE } from '../config';
 import { useAuth } from '../context/AuthContext';
+import { useBle } from '../context/BleContext';
+import DataQualityCard from '../components/DataQualityCard';
 
 // ── BLE constants ─────────────────────────────────────────────────────────────
 const NUS_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
 const NUS_TX_CHAR = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E'; // device → phone (notify)
 const NUS_RX_CHAR = '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'; // phone → device (write)
-const DEVICE_NAME = 'SwimLogger';
 
-// UUID comparison is case-insensitive — BLE stacks return varying cases
-const uuidEq = (a, b) => a?.toLowerCase() === b?.toLowerCase();
-
-// ── BleManager: one instance for app lifetime ─────────────────────────────────
-const manager = new BleManager();
+// Buffer-and-dump protocol (firmware 1.1.0):
+//   META response = exactly 8 bytes [session_start_us u32 LE][device_now_us u32 LE]
+//   End-of-dump marker = exactly 1 byte 0xEE
+//   Sample packets = any non-zero multiple of 7 bytes
+const META_SIZE = 8;
+const END_OF_DUMP_MARKER = 0xEE;
+const RETRIEVAL_STALL_MS = 30000;
 
 // ── Packet parser ─────────────────────────────────────────────────────────────
-// Expected: 14 bytes = 2 samples × 7 bytes
 // Sample: [uint32 timestamp_us LE][uint16 angle_counts LE][uint8 magnet_ok]
 function parsePacket(base64) {
   if (!base64) return { samples: [], error: 'null value from characteristic' };
@@ -35,78 +36,62 @@ function parsePacket(base64) {
     return { samples: [], error: `base64 decode failed: ${e.message}` };
   }
   if (buf.length === 0) return { samples: [], error: 'empty buffer' };
-  if (buf.length !== 14) {
-    return { samples: [], error: `unexpected length ${buf.length} (expected 14)` };
+  // Each sample is 7 bytes: [uint32 ts_us][uint16 angle][uint8 magnet_ok].
+  // Accept any packet that is a non-zero multiple of 7.
+  if (buf.length % 7 !== 0) {
+    return { samples: [], error: `unexpected length ${buf.length} (expected multiple of 7)` };
   }
-  const samples = [0, 7].map(offset => ({
-    timestamp_us: buf.readUInt32LE(offset),
-    angle_counts: buf.readUInt16LE(offset + 4),
-    magnet_ok: buf.readUInt8(offset + 6),
+  const numSamples = buf.length / 7;
+  const samples = Array.from({ length: numSamples }, (_, i) => ({
+    timestamp_us: buf.readUInt32LE(i * 7),
+    angle_counts: buf.readUInt16LE(i * 7 + 4),
+    magnet_ok: buf.readUInt8(i * 7 + 6),
   }));
   return { samples, error: null };
 }
 
-// ── Velocity chart ────────────────────────────────────────────────────────────
-function VelocityChart({ time, velocity }) {
-  const W = Dimensions.get('window').width - 48;
-  const H = 150;
-  const PAD = 4;
-
-  if (!time || time.length < 2) {
-    return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
-  }
-
-  // Downsample to max 400 points; filter null/NaN (from _clean() in api.py)
-  const step = Math.max(1, Math.floor(time.length / 400));
-  const indices = [];
-  for (let i = 0; i < time.length; i += step) {
-    if (velocity[i] != null && !isNaN(velocity[i])) indices.push(i);
-  }
-  if (indices.length < 2) return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
-  const t = indices.map(i => time[i]);
-  const v = indices.map(i => velocity[i]);
-
-  const tMin = t[0], tMax = t[t.length - 1];
-  const vMin = Math.min(...v), vMax = Math.max(...v);
-  const vRange = vMax - vMin || 1;
-  const tRange = tMax - tMin || 1;
-
-  const px = (val) => PAD + ((val - tMin) / tRange) * (W - PAD * 2);
-  const py = (val) => H - PAD - ((val - vMin) / vRange) * (H - PAD * 2);
-
-  const points = t.map((ti, i) => `${px(ti).toFixed(1)},${py(v[i]).toFixed(1)}`).join(' ');
-  const zeroY = py(0) < 0 ? -1 : py(0) > H ? H + 1 : py(0);
-
-  return (
-    <Svg width={W} height={H + 20}>
-      <Line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#E8E8E8" strokeWidth={1} />
-      <Polyline points={points} fill="none" stroke="#1E3A5F" strokeWidth={1.5} />
-      <SvgText x={PAD} y={H + 14} fontSize={10} fill="#AAA">{tMin.toFixed(0)}s</SvgText>
-      <SvgText x={W - 24} y={H + 14} fontSize={10} fill="#AAA">{tMax.toFixed(0)}s</SvgText>
-      <SvgText x={PAD} y={12} fontSize={10} fill="#AAA">{vMax.toFixed(1)}</SvgText>
-    </Svg>
-  );
-}
-
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function RecordScreen({ route, navigation }) {
-  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0 } = route?.params ?? {};
+  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null } = route?.params ?? {};
+  useEffect(() => { navigation.setOptions({ gestureEnabled: false }); }, []);
+
   const { session, signOut } = useAuth();
   const sessionRef = useRef(session);
   useEffect(() => { sessionRef.current = session; }, [session]);
 
-  const [bleState, setBleState] = useState('idle');
-  const [devices, setDevices]   = useState([]);
+  const { connectedDevice, connectionStatus, knownDevices } = useBle();
+  const deviceRef = useRef(connectedDevice);
+  useEffect(() => { deviceRef.current = connectedDevice; }, [connectedDevice]);
+  const chipId = knownDevices.find(d => d.bleId === connectedDevice?.id)?.chipId ?? null;
+
+  // 'ready' | 'recording' | 'retrieving' | 'saving' | 'uploading' | 'results' | 'error'
+  const [bleState, setBleState] = useState('ready');
   const [sampleCount, setSampleCount] = useState(0);
   const [savedPath, setSavedPath]     = useState(null);
   const [apiResult, setApiResult]     = useState(null);
-  const deviceRef      = useRef(null);
+  const [elapsedS, setElapsedS]       = useState(0);
+  const [sessionStartPhoneMs, setSessionStartPhoneMs] = useState(null);
+
   const subscriptionRef = useRef(null);
-  const disconnectRef   = useRef(null);
   const samplesRef      = useRef([]);
-  const scanTimerRef    = useRef(null);
-  const firstPacketRef  = useRef(false);
   const isStoppingRef   = useRef(false);
+  const stallTimerRef   = useRef(null);
+  const metaSeenRef     = useRef(false);
+  const dumpDoneRef     = useRef(false);
+  const elapsedTimerRef = useRef(null);
+  const bleStateRef     = useRef('ready');
+  useEffect(() => { bleStateRef.current = bleState; }, [bleState]);
+
+  const [markerTimeS, setMarkerTimeS] = useState(null);
+  const [markerLabel, setMarkerLabel] = useState('');
+  const [unit, setUnit] = useState('metric');
+
+  const unitFactor = unit === 'imperial' ? 1.09361 : 1;
+  const distUnit   = unit === 'imperial' ? 'yd' : 'm';
+  const velUnit    = unit === 'imperial' ? 'yd/s' : 'm/s';
+  const fmtDist    = (val) => val != null ? (val * unitFactor).toFixed(1) : null;
+  const fmtVel     = (val) => val != null ? (val * unitFactor).toFixed(2) : null;
+  const efficiencyUnreliable = (apiResult?.session?.cv_isi ?? 0) > 0.80;
 
   const log = useCallback((msg, level = 'info') => {
     console.log(`[${level.toUpperCase()}] ${msg}`);
@@ -115,11 +100,35 @@ export default function RecordScreen({ route, navigation }) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      clearTimeout(scanTimerRef.current);
-      manager.stopDeviceScan();
       subscriptionRef.current?.remove();
-      disconnectRef.current?.remove();
+      clearTimeout(stallTimerRef.current);
+      clearInterval(elapsedTimerRef.current);
     };
+  }, []);
+
+  // Mid-flow disconnect (context-level watcher) — device retains its buffer,
+  // so the user can reconnect and Retrieve again.
+  useEffect(() => {
+    if (connectionStatus !== 'connected'
+        && (bleStateRef.current === 'recording' || bleStateRef.current === 'retrieving')) {
+      subscriptionRef.current?.remove();
+      subscriptionRef.current = null;
+      clearTimeout(stallTimerRef.current);
+      clearInterval(elapsedTimerRef.current);
+      log('Device disconnected mid-flow — session is retained on the device', 'warn');
+      setBleState('error');
+    }
+  }, [connectionStatus, log]);
+
+  // ── BLE write helper ──────────────────────────────────────────────────────────
+  const writeCmd = useCallback(async (cmd) => {
+    await Promise.race([
+      deviceRef.current.writeCharacteristicWithResponseForService(
+        NUS_SERVICE, NUS_RX_CHAR,
+        Buffer.from(cmd + '\n').toString('base64'),
+      ),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('write timeout')), 3000)),
+    ]);
   }, []);
 
   // ── Save CSV ─────────────────────────────────────────────────────────────────
@@ -136,63 +145,22 @@ export default function RecordScreen({ route, navigation }) {
     return { path, count: samples.length };
   }, [log]);
 
-  // ── Stop recording ────────────────────────────────────────────────────────────
-  const stopRecording = useCallback(async (isError = false) => {
-    if (isStoppingRef.current) { log('stopRecording called twice — ignoring', 'warn'); return; }
-    isStoppingRef.current = true;
-    log('Stopping recording...');
-    subscriptionRef.current?.remove();
-    subscriptionRef.current = null;
-    disconnectRef.current?.remove();
-    disconnectRef.current = null;
-
-    try {
-      if (deviceRef.current) {
-        log('Sending STOP command (write-with-response)...');
-        await Promise.race([
-          deviceRef.current.writeCharacteristicWithResponseForService(
-            NUS_SERVICE, NUS_RX_CHAR,
-            Buffer.from('STOP\n').toString('base64'),
-          ),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('write timeout')), 1500)),
-        ]);
-        log('STOP command sent', 'ok');
-      }
-    } catch (e) {
-      log(`STOP command failed (non-fatal): ${e.message}`, 'warn');
-    }
-
-    setBleState('saving');
-    const captured = [...samplesRef.current];
-    log(`Captured ${captured.length} total samples`);
-
-    try {
-      const { path } = await saveCSV(captured);
-      setSavedPath(path);
-      if (isError) {
-        setBleState('error');
-      } else {
-        uploadAndProcess(path); // fire-and-forget — manages its own state transitions
-      }
-    } catch (e) {
-      log(`Save failed: ${e.message}`, 'error');
-      setBleState('error');
-    }
-  }, [log, saveCSV]);
-
   // ── Upload to FastAPI ─────────────────────────────────────────────────────────
   // Uses FileSystem.uploadAsync (native multipart) instead of fetch + FormData
   // because RN 0.85/Hermes rejects the {uri, name, type} FormData pattern with
   // "Unsupported FormData implementation".
   const uploadAndProcess = useCallback(async (filePath) => {
     setBleState('uploading');
-    log(`Uploading — athlete_id: ${athleteId ?? 'none'}, head_waist_m: ${headWaistM}`);
+    log(`Uploading — athlete_id: ${athleteId ?? 'none'}, device_id: ${chipId ?? 'none'}`);
     try {
       const authHeaders = sessionRef.current?.access_token
         ? { Authorization: `Bearer ${sessionRef.current.access_token}` }
         : {};
-      const parameters = { head_waist_m: String(headWaistM) };
-      if (athleteId) parameters.athlete_id = String(athleteId);
+      const parameters = { head_waist_m: String(headWaistM), stroke_type: strokeType };
+      if (athleteId)    parameters.athlete_id = String(athleteId);
+      if (sessionName)  parameters.name       = sessionName;
+      if (sessionNotes) parameters.notes      = sessionNotes;
+      if (chipId)       parameters.device_id  = chipId;
 
       const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
         httpMethod: 'POST',
@@ -203,6 +171,13 @@ export default function RecordScreen({ route, navigation }) {
         parameters,
       });
 
+      if (result.status === 402) {
+        let msg = 'You have reached a plan limit.';
+        try { msg = JSON.parse(result.body).detail || msg; } catch {}
+        Alert.alert('Plan Limit Reached', msg + '\n\nVisit swimnetics.com to upgrade.', [{ text: 'OK' }]);
+        setBleState('error');
+        return;
+      }
       if (result.status < 200 || result.status >= 300) {
         throw new Error(`API ${result.status}: ${result.body.slice(0, 120)}`);
       }
@@ -211,233 +186,188 @@ export default function RecordScreen({ route, navigation }) {
       log(`Upload complete. Stroke rate: ${data.session?.stroke_rate_spm?.toFixed(1)} SPM`, 'ok');
       setApiResult(data);
       setBleState('results');
-
-      // Re-register disconnect watcher for results state.
-      // stopRecording() clears disconnectRef, so without this the device can
-      // disconnect silently (firmware idle timeout after STOP) and the UI
-      // stays stale until the user taps "Record Again".
-      if (deviceRef.current) {
-        disconnectRef.current?.remove();
-        disconnectRef.current = deviceRef.current.onDisconnected(() => {
-          disconnectRef.current = null;
-          deviceRef.current = null;
-          setDevices([]);
-          log('Device disconnected — session saved. Tap "Record Again" to rescan.', 'warn');
-          setBleState('idle');
-        });
-      }
-
     } catch (e) {
       log(`Upload failed: ${e.message}`, 'error');
       setBleState('error');
     }
-  }, [log, athleteId, headWaistM]);
+  }, [log, athleteId, headWaistM, strokeType, sessionName, sessionNotes, chipId]);
 
-  // ── Scan ──────────────────────────────────────────────────────────────────────
-  const startScan = useCallback(() => {
-    setDevices([]);
-    setBleState('scanning');
-    log('Starting BLE scan for "SwimLogger"...');
+  // ── Retrieval (META → clock correlation → DUMP → save/upload) ────────────────
+  const finishRetrieval = useCallback(async (stalled = false) => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    clearTimeout(stallTimerRef.current);
 
-    const seen = new Set();
-    manager.startDeviceScan(null, { allowDuplicates: false }, (error, device) => {
-      if (error) {
-        log(`Scan error: ${error.message}`, 'error');
-        setBleState('idle');
-        return;
-      }
-      if (device?.name) {
-        log(`Found: "${device.name}" (${device.id})`);
-        if (device.name === DEVICE_NAME && !seen.has(device.id)) {
-          seen.add(device.id);
-          setDevices(prev => [...prev, { id: device.id, name: device.name }]);
-          log(`SwimLogger found!`, 'ok');
-        }
-      }
-    });
-
-    scanTimerRef.current = setTimeout(() => {
-      manager.stopDeviceScan();
-      log('Scan complete');
-      setBleState('idle');
-    }, 8000);
-  }, [log]);
-
-  // ── Connect & discover ────────────────────────────────────────────────────────
-  const connectTo = useCallback(async (deviceId) => {
-    clearTimeout(scanTimerRef.current);
-    manager.stopDeviceScan();
-    setBleState('connecting');
-    log(`Connecting to ${deviceId}...`);
-
-    try {
-      const device = await manager.connectToDevice(deviceId);
-      log('Connected. Discovering services...', 'ok');
-
-      await device.discoverAllServicesAndCharacteristics();
-      log('Discovery complete', 'ok');
-
-      // Enumerate all services and characteristics for debugging
-      const services = await device.services();
-      log(`Found ${services.length} service(s):`);
-      let nusFound = false;
-      let txFound = false;
-      let rxFound = false;
-
-      for (const svc of services) {
-        const isNUS = uuidEq(svc.uuid, NUS_SERVICE);
-        log(`  Service: ${svc.uuid}${isNUS ? ' ← NUS ✓' : ''}`);
-        if (isNUS) nusFound = true;
-
-        const chars = await svc.characteristics();
-        for (const c of chars) {
-          const isTX = uuidEq(c.uuid, NUS_TX_CHAR);
-          const isRX = uuidEq(c.uuid, NUS_RX_CHAR);
-          const props = [
-            c.isNotifiable    ? 'notify'  : '',
-            c.isIndicatable   ? 'indicate': '',
-            c.isWritableWithoutResponse ? 'write-no-resp' : '',
-            c.isWritableWithResponse    ? 'write-resp'    : '',
-            c.isReadable      ? 'read'    : '',
-          ].filter(Boolean).join(', ');
-          log(`    Char: ${c.uuid} [${props}]${isTX ? ' ← TX ✓' : ''}${isRX ? ' ← RX ✓' : ''}`);
-          if (isTX) txFound = true;
-          if (isRX) rxFound = true;
-        }
-      }
-
-      if (!nusFound) log('WARNING: NUS service NOT found in device services!', 'error');
-      if (!txFound)  log('WARNING: NUS TX characteristic NOT found!', 'error');
-      if (!rxFound)  log('WARNING: NUS RX characteristic NOT found!', 'warn');
-
-      deviceRef.current = device;
-
-      // Watch for unexpected disconnects while in connected/results state
-      disconnectRef.current = device.onDisconnected(() => {
-        log('SwimLogger disconnected unexpectedly', 'warn');
-        disconnectRef.current = null;
-        deviceRef.current = null;
-        setDevices([]);
-        setBleState('idle'); // go to idle so user can rescan
-      });
-
-      setBleState('connected');
-    } catch (e) {
-      log(`Connection failed: ${e.message}`, 'error');
-      setBleState('idle');
+    const captured = [...samplesRef.current];
+    log(`Retrieval ${stalled ? 'STALLED' : 'complete'} — ${captured.length} samples`);
+    if (captured.length === 0) {
+      Alert.alert('Nothing Retrieved', 'No samples were received from the device.');
+      setBleState('ready');
+      return;
     }
-  }, [log]);
+    if (stalled) {
+      Alert.alert('Retrieval Incomplete',
+        'The end-of-dump marker never arrived. Saving what was received.');
+    }
 
-  // ── Start recording ───────────────────────────────────────────────────────────
-  const startRecording = useCallback(async () => {
+    setBleState('saving');
+    try {
+      const { path } = await saveCSV(captured);
+      setSavedPath(path);
+      uploadAndProcess(path); // fire-and-forget — manages its own state transitions
+    } catch (e) {
+      log(`Save failed: ${e.message}`, 'error');
+      setBleState('error');
+    }
+  }, [log, saveCSV, uploadAndProcess]);
+
+  const runRetrieval = useCallback(async () => {
     samplesRef.current = [];
-    firstPacketRef.current = false;
-    isStoppingRef.current = false; // safety reset — ensures Stop works on every session
+    metaSeenRef.current = false;
+    dumpDoneRef.current = false;
     setSampleCount(0);
     setSavedPath(null);
-    setBleState('recording');
-    log('Starting recording...');
+    setSessionStartPhoneMs(null);
+    setBleState('retrieving');
+    log('Starting retrieval (META → DUMP)...');
+
+    const resetStallTimer = () => {
+      clearTimeout(stallTimerRef.current);
+      stallTimerRef.current = setTimeout(() => {
+        if (!dumpDoneRef.current) finishRetrieval(true);
+      }, RETRIEVAL_STALL_MS);
+    };
 
     try {
-      // Subscribe FIRST — before sending START
-      log(`Subscribing to TX char: ${NUS_TX_CHAR}`);
+      // Subscribe FIRST — before sending any command (locked pattern)
       subscriptionRef.current = deviceRef.current.monitorCharacteristicForService(
         NUS_SERVICE, NUS_TX_CHAR,
         (error, characteristic) => {
           if (error) {
-            // Code 2 = OperationCancelled — expected when Stop removes the subscription
-            if (error.errorCode === 2) {
-              log(`Subscription cancelled (expected on stop)`, 'warn');
-              return;
-            }
-            // Log other errors but do NOT auto-stop — avoids spurious double-stop.
-            // The disconnect watcher handles true device disconnections.
+            // Code 2 = OperationCancelled — expected when retrieval removes the subscription
+            if (error.errorCode === 2) return;
             log(`Notification error: ${error.message} (code: ${error.errorCode})`, 'error');
             return;
           }
+          if (!characteristic?.value) return;
+          const buf = Buffer.from(characteristic.value, 'base64');
+          resetStallTimer();
 
-          if (!firstPacketRef.current) {
-            firstPacketRef.current = true;
-            log(`First packet received! value length hint: ${
-              characteristic.value ? Buffer.from(characteristic.value, 'base64').length : 'null'
-            } bytes`, 'ok');
-          }
+          // META response — exactly 8 bytes (not a multiple of 7)
+          if (buf.length === META_SIZE && !metaSeenRef.current) {
+            metaSeenRef.current = true;
+            const phoneNowMs     = Date.now();
+            const sessionStartUs = buf.readUInt32LE(0);
+            const deviceNowUs    = buf.readUInt32LE(4);
 
-          const { samples, error: parseError } = parsePacket(characteristic.value);
-          if (parseError) {
-            log(`Parse error: ${parseError}`, 'error');
+            if (sessionStartUs === 0) {
+              log('META: no session buffered on device', 'warn');
+              subscriptionRef.current?.remove();
+              subscriptionRef.current = null;
+              clearTimeout(stallTimerRef.current);
+              Alert.alert('No Session', 'The device has no recorded session to retrieve.');
+              setBleState('ready');
+              return;
+            }
+
+            // uint32 modular subtraction — device clock (micros) wraps at 2^32
+            const elapsedUs = (deviceNowUs - sessionStartUs + 2 ** 32) % 2 ** 32;
+            const startPhoneMs = phoneNowMs - elapsedUs / 1000;
+            setSessionStartPhoneMs(startPhoneMs);
+            log(`META: session started ${(elapsedUs / 1e6).toFixed(2)} s ago — `
+                + `sessionStartPhoneMs=${startPhoneMs.toFixed(0)} `
+                + `(${new Date(startPhoneMs).toISOString()})`, 'ok');
+
+            writeCmd('DUMP').catch(e => {
+              log(`DUMP write failed: ${e.message}`, 'error');
+              finishRetrieval(true);
+            });
             return;
           }
+
+          // End-of-dump marker — exactly 1 byte 0xEE
+          if (buf.length === 1 && buf[0] === END_OF_DUMP_MARKER) {
+            dumpDoneRef.current = true;
+            finishRetrieval(false);
+            return;
+          }
+
+          // Sample packets — any non-zero multiple of 7 bytes
+          const { samples, error: parseError } = parsePacket(characteristic.value);
+          if (parseError) return; // META duplicates / unknown packets — ignore
           samplesRef.current.push(...samples);
           setSampleCount(c => c + samples.length);
         },
       );
-      log('Subscription active. Waiting for data...', 'ok');
 
-      // Send START — RX char is [write-resp] so use writeWithResponse
-      log(`Sending START to RX char: ${NUS_RX_CHAR} (write-with-response)`);
-      try {
-        await Promise.race([
-          deviceRef.current.writeCharacteristicWithResponseForService(
-            NUS_SERVICE, NUS_RX_CHAR,
-            Buffer.from('START\n').toString('base64'),
-          ),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('write timeout')), 3000)),
-        ]);
-        log('START sent and acknowledged by device', 'ok');
-      } catch (e) {
-        log(`START write failed: ${e.message} — continuing anyway`, 'warn');
-      }
-
-      // Replace idle watcher with recording watcher — remove old before registering new
-      disconnectRef.current?.remove();
-      disconnectRef.current = deviceRef.current.onDisconnected((error) => {
-        log(`Device disconnected${error ? ': ' + error.message : ''}`, 'warn');
-        stopRecording(true);
-      });
-
+      resetStallTimer();
+      await writeCmd('META');
+      log('META sent', 'ok');
     } catch (e) {
-      log(`Failed to start: ${e.message}`, 'error');
-      setBleState('connected');
+      log(`Retrieval failed to start: ${e.message}`, 'error');
+      subscriptionRef.current?.remove();
+      subscriptionRef.current = null;
+      clearTimeout(stallTimerRef.current);
+      setBleState('error');
     }
-  }, [log, stopRecording]);
+  }, [log, writeCmd, finishRetrieval]);
+
+  // ── Remote record (device buffers; data arrives at retrieval) ────────────────
+  const startRecording = useCallback(async () => {
+    isStoppingRef.current = false;
+    setSavedPath(null);
+    setApiResult(null);
+    try {
+      await writeCmd('START');
+      log('START sent — device is buffering', 'ok');
+      setElapsedS(0);
+      const t0 = Date.now();
+      elapsedTimerRef.current = setInterval(
+        () => setElapsedS(Math.floor((Date.now() - t0) / 1000)), 1000);
+      setBleState('recording');
+    } catch (e) {
+      log(`START failed: ${e.message}`, 'error');
+      Alert.alert('Start Failed', e.message ?? 'Could not start recording.');
+    }
+  }, [log, writeCmd]);
+
+  const stopRecording = useCallback(async () => {
+    if (isStoppingRef.current) { log('stopRecording called twice — ignoring', 'warn'); return; }
+    isStoppingRef.current = true;
+    clearInterval(elapsedTimerRef.current);
+    try {
+      await writeCmd('STOP');
+      log('STOP sent', 'ok');
+    } catch (e) {
+      log(`STOP failed (non-fatal): ${e.message}`, 'warn');
+    }
+    runRetrieval(); // device holds the buffer — retrieve it now
+  }, [log, writeCmd, runRetrieval]);
 
   // ── Reset ─────────────────────────────────────────────────────────────────────
-  const reset = useCallback(async () => {
-    // Clean up any active recording subscriptions (already null after stopRecording,
-    // but guard in case reset is called from an unexpected state)
+  const reset = useCallback(() => {
     subscriptionRef.current?.remove();
     subscriptionRef.current = null;
-    disconnectRef.current?.remove();
-    disconnectRef.current = null;
-
-    // Check if the BLE connection is still alive — stay connected if so
-    let stillConnected = false;
-    if (deviceRef.current) {
-      try {
-        stillConnected = await deviceRef.current.isConnected();
-      } catch (_) {}
-    }
-
+    clearTimeout(stallTimerRef.current);
+    clearInterval(elapsedTimerRef.current);
     samplesRef.current = [];
     isStoppingRef.current = false;
-    firstPacketRef.current = false;
     setSampleCount(0);
     setSavedPath(null);
     setApiResult(null);
-
-    if (stillConnected) {
-      // Device still connected — go straight to connected state, skip scan
-      log('--- Reset (device still connected) ---');
-      setBleState('connected');
-    } else {
-      // Connection dropped — go to idle so user can rescan
-      deviceRef.current = null;
-      setDevices([]);
-      log('--- Reset (device disconnected, scan to reconnect) ---');
-      setBleState('idle');
-    }
+    setMarkerTimeS(null);
+    setMarkerLabel('');
+    setSessionStartPhoneMs(null);
+    setElapsedS(0);
+    log('--- Reset ---');
+    setBleState('ready'); // connection lives in BleContext — nothing to rescan
   }, [log]);
+
+  const fmtElapsed = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+  const deviceLabel = connectedDevice?.name ?? 'SwimLogger';
+  const notConnected = connectionStatus !== 'connected';
+  const preResultState = ['ready', 'recording', 'retrieving'].includes(bleState);
 
 // ── Render ────────────────────────────────────────────────────────────────────
   return (
@@ -456,59 +386,58 @@ export default function RecordScreen({ route, navigation }) {
       </View>
 
       <View style={{ flex: 1 }}>
+      {/* Device not connected — connection is managed in Config/Devices screens */}
+      {notConnected && preResultState && (
+        <View style={styles.statusArea}>
+          <Text style={[styles.statusText, { color: '#C0392B' }]}>⚠ Device not connected</Text>
+          <Text style={styles.hintText}>
+            Reconnect from the previous screen. A session recorded on the device is retained
+            and can be retrieved after reconnecting.
+          </Text>
+          <TouchableOpacity style={styles.primaryBtn} onPress={() => navigation.goBack()}>
+            <Text style={styles.btnText}>‹ Back</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* STATUS AREA — hidden during results to avoid wasting space */}
-      {bleState !== 'results' && <View style={styles.statusArea}>
-        {(bleState === 'idle') && (
+      {!(notConnected && preResultState) && bleState !== 'results' && <View style={styles.statusArea}>
+        {bleState === 'ready' && (
           <>
-            <TouchableOpacity style={styles.primaryBtn} onPress={startScan}>
-              <Text style={styles.btnText}>Scan for Devices</Text>
-            </TouchableOpacity>
-            {devices.length > 0 && (
-              <FlatList
-                data={devices}
-                keyExtractor={i => i.id}
-                style={{ marginTop: 12, width: '100%' }}
-                renderItem={({ item }) => (
-                  <TouchableOpacity style={styles.deviceItem} onPress={() => connectTo(item.id)}>
-                    <Text style={styles.deviceName}>{item.name}</Text>
-                    <Text style={styles.deviceId}>{item.id}</Text>
-                  </TouchableOpacity>
-                )}
-              />
-            )}
-          </>
-        )}
-
-        {bleState === 'scanning' && (
-          <View style={styles.row}>
-            <ActivityIndicator color="#1E3A5F" />
-            <Text style={styles.statusText}> Scanning...</Text>
-          </View>
-        )}
-
-        {bleState === 'connecting' && (
-          <View style={styles.row}>
-            <ActivityIndicator color="#1E3A5F" />
-            <Text style={styles.statusText}> Connecting...</Text>
-          </View>
-        )}
-
-        {bleState === 'connected' && (
-          <>
-            <Text style={[styles.statusText, { color: '#27AE60' }]}>✓ SwimLogger connected</Text>
+            <Text style={[styles.statusText, { color: '#27AE60' }]}>✓ {deviceLabel} connected</Text>
             <TouchableOpacity style={styles.primaryBtn} onPress={startRecording}>
               <Text style={styles.btnText}>Start Recording</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={runRetrieval}>
+              <Text style={styles.secondaryBtnText}>Retrieve from Device</Text>
+            </TouchableOpacity>
+            <Text style={styles.hintText}>
+              Retrieve a session the swimmer recorded with the device button.
+            </Text>
           </>
         )}
 
         {bleState === 'recording' && (
           <>
-            <Text style={styles.counterLabel}>Samples</Text>
-            <Text style={styles.counter}>{sampleCount.toLocaleString()}</Text>
-            <TouchableOpacity style={styles.stopBtn} onPress={() => stopRecording(false)}>
+            <Text style={styles.counterLabel}>Recording on device</Text>
+            <Text style={styles.counter}>{fmtElapsed(elapsedS)}</Text>
+            <Text style={styles.hintText}>
+              Data is buffered on the device and retrieved after stopping.
+            </Text>
+            <TouchableOpacity style={styles.stopBtn} onPress={stopRecording}>
               <Text style={styles.btnText}>Stop Recording</Text>
             </TouchableOpacity>
+          </>
+        )}
+
+        {bleState === 'retrieving' && (
+          <>
+            <View style={styles.row}>
+              <ActivityIndicator color="#1E3A5F" />
+              <Text style={styles.statusText}> Retrieving session…</Text>
+            </View>
+            <Text style={styles.counterLabel}>Samples</Text>
+            <Text style={styles.counter}>{sampleCount.toLocaleString()}</Text>
           </>
         )}
 
@@ -532,8 +461,11 @@ export default function RecordScreen({ route, navigation }) {
               ⚠ Recording error
             </Text>
             {savedPath && <Text style={styles.pathText}>{savedPath.split('/').pop()}</Text>}
+            <Text style={styles.hintText}>
+              If the device still holds the session, reconnect and tap Retrieve from Device.
+            </Text>
             <TouchableOpacity style={styles.primaryBtn} onPress={reset}>
-              <Text style={styles.btnText}>Record Again</Text>
+              <Text style={styles.btnText}>Try Again</Text>
             </TouchableOpacity>
           </>
         )}
@@ -549,7 +481,7 @@ export default function RecordScreen({ route, navigation }) {
             {apiResult.initial_phase?.dive_detected ? (
               <View style={styles.metricRow}>
                 <MetricItem label="Dive Duration" value={apiResult.initial_phase.dive_duration_s?.toFixed(2)} unit="s" />
-                <MetricItem label="Pulldown Peak" value={apiResult.initial_phase.pulldown_peak_vel_ms?.toFixed(2)} unit="m/s" />
+                <MetricItem label="Pulldown Peak" value={fmtVel(apiResult.initial_phase.pulldown_peak_vel_ms)} unit={velUnit} />
                 <MetricItem label="Pulldown Time" value={apiResult.initial_phase.pulldown_duration_s?.toFixed(2)} unit="s" />
               </View>
             ) : (
@@ -566,34 +498,67 @@ export default function RecordScreen({ route, navigation }) {
             <Text style={styles.sectionTitle}>Session</Text>
             <View style={styles.metricRow}>
               <MetricItem label="Lap Time"     value={apiResult.session?.lap_time_s?.toFixed(2)}          unit="s" />
-              <MetricItem label="Distance"     value={apiResult.session?.total_dist_m?.toFixed(1)}         unit="m" />
-              <MetricItem label="Stroke Rate"  value={apiResult.session?.stroke_rate_spm?.toFixed(1)}      unit="SPM" />
+              <MetricItem label="Distance"     value={fmtDist(apiResult.session?.total_dist_m)}            unit={distUnit} />
+              <MetricItem label="Active Rate"  value={apiResult.session?.stroke_rate_spm?.toFixed(1)}      unit="SPM" />
             </View>
             <View style={styles.metricRow}>
               <MetricItem label="Strokes"      value={apiResult.session?.stroke_count}                     unit="" />
-              <MetricItem label="Avg Speed"    value={apiResult.session?.mean_vel_ms?.toFixed(2)}           unit="m/s" />
-              <MetricItem label="Max Speed"    value={apiResult.session?.max_vel_ms?.toFixed(2)}            unit="m/s" />
+              <MetricItem label="Avg Speed"    value={fmtVel(apiResult.session?.mean_vel_ms)}              unit={velUnit} />
+              <MetricItem label="Max Speed"    value={fmtVel(apiResult.session?.max_vel_ms)}               unit={velUnit} />
             </View>
           </View>
 
           {/* ── Efficiency ── */}
           <View style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Efficiency</Text>
-            <View style={styles.metricRow}>
-              <MetricItem label="Dist/Stroke"  value={apiResult.session?.mean_dps_m?.toFixed(2)}                       unit="m" />
-              <MetricItem label="Impulse"      value={apiResult.session?.mean_impulse_m?.toFixed(2)}                    unit="m" />
-              <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
-            </View>
-            <View style={styles.metricRow}>
-              <MetricItem label="ISI CV"       value={apiResult.session?.cv_isi != null ? (apiResult.session.cv_isi * 100).toFixed(1) : null}             unit="%" />
-              <MetricItem label="Arm Peak CV"  value={apiResult.session?.cv_arm_peak_vel != null ? (apiResult.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
-              <MetricItem label="Fatigue"      value={apiResult.session?.fatigue_index_pct?.toFixed(1)}                unit="%" />
-            </View>
+            {efficiencyUnreliable ? (
+              <Text style={styles.unreliableWarn}>
+                Stroke detection may be unreliable for this session.{'\n'}
+                Check recording conditions or technique consistency.
+              </Text>
+            ) : (
+              <>
+                <View style={styles.metricRow}>
+                  <MetricItem label="Dist/Stroke"  value={fmtDist(apiResult.session?.mean_dps_m)}                          unit={distUnit} />
+                  <MetricItem label="Impulse"      value={fmtDist(apiResult.session?.mean_impulse_m)}                       unit={distUnit} />
+                  <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
+                </View>
+                <View style={styles.metricRow}>
+                  <MetricItem label="ISI CV"       value={apiResult.session?.cv_isi != null ? (apiResult.session.cv_isi * 100).toFixed(1) : null}             unit="%" />
+                  <MetricItem label="Arm Peak CV"  value={apiResult.session?.cv_arm_peak_vel != null ? (apiResult.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
+                  <MetricItem label="Fatigue"      value={apiResult.session?.fatigue_index_pct?.toFixed(1)}                unit="%" />
+                </View>
+              </>
+            )}
           </View>
 
           {/* ── Velocity Chart ── */}
-          <Text style={styles.chartTitle}>Velocity</Text>
-          <VelocityChart time={apiResult.time} velocity={apiResult.velocity} />
+          <View style={styles.chartHeader}>
+            <Text style={styles.chartTitle}>Velocity</Text>
+            <View style={styles.unitToggle}>
+              <TouchableOpacity
+                style={[styles.unitBtn, unit === 'metric' && styles.unitBtnActive]}
+                onPress={() => setUnit('metric')}
+              >
+                <Text style={[styles.unitBtnText, unit === 'metric' && styles.unitBtnTextActive]}>m</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.unitBtn, unit === 'imperial' && styles.unitBtnActive]}
+                onPress={() => setUnit('imperial')}
+              >
+                <Text style={[styles.unitBtnText, unit === 'imperial' && styles.unitBtnTextActive]}>yd</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <VelocityChart
+            time={apiResult.time}
+            velocity={apiResult.velocity}
+            markerTimeS={markerTimeS}
+            markerLabel={markerLabel}
+            unitFactor={unitFactor}
+            unitLabel={velUnit}
+            interactive
+          />
 
           {/* ── Time to Distance ── */}
           <View style={styles.sectionCard}>
@@ -603,8 +568,20 @@ export default function RecordScreen({ route, navigation }) {
               distArr={apiResult.distance}
               baselineEndS={apiResult.session?.baseline_end_s}
               headWaistM={headWaistM}
+              onMarkerChange={(tS, lbl) => { setMarkerTimeS(tS); setMarkerLabel(lbl); }}
+              unit={unit}
             />
           </View>
+
+          {/* ── Data Quality ── */}
+          <DataQualityCard dataQuality={apiResult.data_quality} />
+
+          {/* ── Sync reference (video overlay) ── */}
+          {sessionStartPhoneMs != null && (
+            <Text style={styles.syncLine}>
+              Session start (phone clock): {new Date(sessionStartPhoneMs).toISOString()}
+            </Text>
+          )}
 
           {/* ── Save status ── */}
           <Text style={[styles.saveStatus, apiResult.athlete_id_received ? styles.saveOk : styles.saveWarn]}>
@@ -639,7 +616,8 @@ function MetricItem({ label, value, unit }) {
 }
 
 // ── TimeToX ───────────────────────────────────────────────────────────────────
-const ALL_PRESETS = [1, 2, 3, 5, 10, 15, 20, 25];
+const ALL_PRESETS = [5, 10, 15, 20, 25];
+const YARD_TO_M = 0.9144;
 
 function computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetM) {
   if (!timeArr?.length || !distArr?.length || baselineEndS == null) return null;
@@ -653,7 +631,10 @@ function computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetM) {
   return parseFloat((timeArr[crossIdx] - timeArr[baseIdx]).toFixed(2));
 }
 
-function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0 }) {
+function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0, onMarkerChange, unit = 'metric' }) {
+  const imp = unit === 'imperial';
+  const unitSuffix = imp ? 'yd' : 'm';
+
   const { presets, maxReachableM } = React.useMemo(() => {
     if (!timeArr?.length || !distArr?.length || baselineEndS == null) {
       return { presets: ALL_PRESETS, maxReachableM: null };
@@ -663,37 +644,66 @@ function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0 }) {
     const distBase = distArr[baseIdx] ?? 0;
     const distMax = distArr[distArr.length - 1] ?? 0;
     const maxM = Math.max(0, distMax - distBase - (headWaistM || 0));
-    const visible = ALL_PRESETS.filter(p => p <= Math.ceil(maxM) + 1);
+    // Filter presets by max reachable distance in the current unit
+    const maxInUnit = imp ? maxM / YARD_TO_M : maxM;
+    const visible = ALL_PRESETS.filter(p => p <= Math.ceil(maxInUnit) + 1);
     return { presets: visible.length > 0 ? visible : ALL_PRESETS, maxReachableM: maxM };
-  }, [timeArr, distArr, baselineEndS, headWaistM]);
+  }, [timeArr, distArr, baselineEndS, headWaistM, imp]);
 
-  const defaultTarget = presets[Math.min(presets.length - 1, presets.findIndex(p => p >= 5) >= 0 ? presets.findIndex(p => p >= 5) : presets.length - 1)];
-  const [targetM, setTargetM] = React.useState(defaultTarget);
+  const defaultTarget = presets[Math.min(presets.length - 1, presets.findIndex(p => p >= 10) >= 0 ? presets.findIndex(p => p >= 10) : presets.length - 1)];
+  const [targetVal, setTargetVal] = React.useState(defaultTarget);
 
   React.useEffect(() => {
-    if (!presets.includes(targetM)) setTargetM(presets[presets.length - 1]);
+    if (!presets.includes(targetVal)) setTargetVal(presets[presets.length - 1]);
   }, [presets]);
 
+  // Convert the selected preset to meters for internal computation
+  const targetMeters = imp ? targetVal * YARD_TO_M : targetVal;
+
   const timeToX = React.useMemo(
-    () => computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetM),
-    [timeArr, distArr, baselineEndS, headWaistM, targetM]
+    () => computeTimeToX(timeArr, distArr, baselineEndS, headWaistM, targetMeters),
+    [timeArr, distArr, baselineEndS, headWaistM, targetMeters]
   );
+
+  // Absolute chart timestamp of the crossing point (for marker line placement)
+  const markerAbsoluteTimeS = React.useMemo(() => {
+    if (!timeArr?.length || !distArr?.length || baselineEndS == null) return null;
+    const baseIdx = timeArr.findIndex(t => t >= baselineEndS);
+    if (baseIdx < 0) return null;
+    const distBase = distArr[baseIdx];
+    const waistTarget = targetMeters - (headWaistM || 0);
+    if (waistTarget <= 0) return null;
+    const crossIdx = distArr.findIndex((d, i) => i >= baseIdx && d != null && d >= distBase + waistTarget);
+    if (crossIdx < 0) return null;
+    return timeArr[crossIdx];
+  }, [timeArr, distArr, baselineEndS, headWaistM, targetMeters]);
+
+  React.useEffect(() => {
+    if (!onMarkerChange) return;
+    onMarkerChange(markerAbsoluteTimeS, `${targetVal}${unitSuffix}`);
+  }, [markerAbsoluteTimeS, targetVal, unit]);
+
+  const maxDisplay = maxReachableM != null
+    ? (imp ? `${(maxReachableM / YARD_TO_M).toFixed(1)} yd` : `${maxReachableM.toFixed(1)} m`)
+    : null;
 
   return (
     <View style={{ alignItems: 'center' }}>
       <Text style={styles.ttxValue}>{timeToX != null ? `${timeToX} s` : '--'}</Text>
-      <Text style={styles.ttxLabel}>to {targetM} m</Text>
-      {maxReachableM != null && (
-        <Text style={styles.ttxMax}>Max from start: {maxReachableM.toFixed(1)} m</Text>
+      <Text style={styles.ttxLabel}>to {targetVal} {unitSuffix}</Text>
+      {maxDisplay != null && (
+        <Text style={styles.ttxMax}>Max from start: {maxDisplay}</Text>
       )}
       <View style={styles.ttxButtons}>
         {presets.map(p => (
           <TouchableOpacity
             key={p}
-            style={[styles.ttxBtn, targetM === p && styles.ttxBtnActive]}
-            onPress={() => setTargetM(p)}
+            style={[styles.ttxBtn, targetVal === p && styles.ttxBtnActive]}
+            onPress={() => setTargetVal(p)}
           >
-            <Text style={[styles.ttxBtnText, targetM === p && styles.ttxBtnTextActive]}>{p}m</Text>
+            <Text style={[styles.ttxBtnText, targetVal === p && styles.ttxBtnTextActive]}>
+              {p}{unitSuffix}
+            </Text>
           </TouchableOpacity>
         ))}
       </View>
@@ -713,12 +723,12 @@ const styles = StyleSheet.create({
   statusArea:   { alignItems: 'center', paddingHorizontal: 24, minHeight: 160 },
   row:          { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
   primaryBtn:   { backgroundColor: '#1E3A5F', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12 },
+  secondaryBtn: { borderColor: '#1E3A5F', borderWidth: 1, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 28, marginTop: 12 },
+  secondaryBtnText: { color: '#1E3A5F', fontSize: 15, fontWeight: '600' },
   stopBtn:      { backgroundColor: '#C0392B', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 20 },
   btnText:      { color: '#FFF', fontSize: 16, fontWeight: '600' },
   statusText:   { fontSize: 15, color: '#2C3E50', marginTop: 12, textAlign: 'center' },
-  deviceItem:   { backgroundColor: '#FFF', borderRadius: 10, padding: 12, marginBottom: 8, width: '100%' },
-  deviceName:   { fontSize: 15, fontWeight: '600', color: '#1E3A5F' },
-  deviceId:     { fontSize: 11, color: '#95A5A6', marginTop: 2 },
+  hintText:     { fontSize: 12, color: '#95A5A6', marginTop: 8, textAlign: 'center', lineHeight: 17 },
   counterLabel: { fontSize: 14, color: '#7F8C8D', marginTop: 20 },
   counter:      { fontSize: 56, fontWeight: '700', color: '#1E3A5F' },
   pathText:     { fontSize: 12, color: '#95A5A6', marginTop: 4, textAlign: 'center' },
@@ -728,7 +738,13 @@ const styles = StyleSheet.create({
   metricLabel:  { fontSize: 11, color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 0.5 },
   metricValue:  { fontSize: 22, fontWeight: '700', color: '#1E3A5F', marginTop: 2 },
   metricUnit:   { fontSize: 11, color: '#95A5A6' },
-  chartTitle:   { fontSize: 11, fontWeight: '600', color: '#7F8C8D', marginTop: 4, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 1 },
+  chartHeader:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 6 },
+  chartTitle:   { fontSize: 11, fontWeight: '600', color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 1 },
+  unitToggle:   { flexDirection: 'row', gap: 6 },
+  unitBtn:      { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, backgroundColor: '#F0F2F5', borderWidth: 1, borderColor: '#E0E4EA' },
+  unitBtnActive:{ backgroundColor: '#1E3A5F', borderColor: '#1E3A5F' },
+  unitBtnText:  { fontSize: 12, fontWeight: '600', color: '#7F8C8D' },
+  unitBtnTextActive: { color: '#FFF' },
   ttxValue:     { fontSize: 42, fontWeight: '700', color: '#1E3A5F' },
   ttxLabel:     { fontSize: 14, color: '#7F8C8D', marginBottom: 4 },
   ttxMax:       { fontSize: 11, color: '#B0B8C4', marginBottom: 12 },
@@ -737,7 +753,9 @@ const styles = StyleSheet.create({
   ttxBtnActive: { backgroundColor: '#1E3A5F', borderColor: '#1E3A5F' },
   ttxBtnText:   { fontSize: 14, fontWeight: '600', color: '#7F8C8D' },
   ttxBtnTextActive: { color: '#FFF' },
-  noDetectText: { fontSize: 13, color: '#95A5A6', fontStyle: 'italic', marginTop: 2 },
+  noDetectText:    { fontSize: 13, color: '#95A5A6', fontStyle: 'italic', marginTop: 2 },
+  unreliableWarn:  { fontSize: 13, color: '#E67E22', fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
+  syncLine:     { fontSize: 11, color: '#95A5A6', textAlign: 'center', marginTop: 10 },
   saveStatus:   { fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 4 },
   saveOk:       { color: '#27AE60' },
   saveWarn:     { color: '#E67E22' },

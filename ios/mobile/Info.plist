@@ -53,6 +53,10 @@
 	<string>Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Swimnetics records swim video to overlay velocity data for playback analysis.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Swim videos are recorded with audio.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleIconName</key>

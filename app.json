@@ -7,11 +7,13 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "com.swimnetics.app",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.",
-        "NSBluetoothPeripheralUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording."
+        "NSBluetoothPeripheralUsageDescription": "Swimnetics uses Bluetooth to connect to SwimLogger for swim recording.",
+        "NSCameraUsageDescription": "Swimnetics records swim video to overlay velocity data for playback analysis.",
+        "NSMicrophoneUsageDescription": "Swim videos are recorded with audio."
       }
     },
     "extra": {
@@ -19,6 +21,9 @@
         "projectId": "db87ba35-184b-4469-a291-559775c12191"
       }
     },
-    "owner": "tzheng846"
+    "owner": "tzheng846",
+    "plugins": [
+      "expo-video"
+    ]
   }
 }

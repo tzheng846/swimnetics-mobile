@@ -7,6 +7,7 @@ import {
 import VelocityChart from '../components/VelocityChart';
 import { supabase } from '../lib/supabase';
 import DataQualityCard from '../components/DataQualityCard';
+import PillarCards from '../components/PillarCards';
 import { useAuth } from '../context/AuthContext';
 import { API_BASE } from '../config';
 
@@ -70,6 +71,7 @@ export default function ReportCardScreen({ route, navigation }) {
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [markerLabel, setMarkerLabel] = useState('');
   const [unit, setUnit] = useState('metric');
+  const [view, setView] = useState('simple');   // 'simple' = pillar cards, 'advanced' = raw metrics
   const [scrollEnabled, setScrollEnabled] = useState(true);
   const scrollViewRef = useRef(null);
   const { session: authSession } = useAuth();
@@ -259,7 +261,28 @@ export default function ReportCardScreen({ route, navigation }) {
 
         <SessionSummaryCard metrics={metrics} unit={unit} />
 
-        {isAnalyticsReady ? (
+        {isAnalyticsReady && (
+          <View style={st.viewToggle}>
+            <TouchableOpacity
+              style={[st.viewBtn, view === 'simple' && st.viewBtnActive]}
+              onPress={() => setView('simple')}
+            >
+              <Text style={[st.viewBtnText, view === 'simple' && st.viewBtnTextActive]}>Simple</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[st.viewBtn, view === 'advanced' && st.viewBtnActive]}
+              onPress={() => setView('advanced')}
+            >
+              <Text style={[st.viewBtnText, view === 'advanced' && st.viewBtnTextActive]}>Advanced</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {isAnalyticsReady && view === 'simple' && (
+          <PillarCards sessionId={sessionId} token={authSession?.access_token} />
+        )}
+
+        {isAnalyticsReady && view === 'advanced' && (
           <>
             {/* Start Phase */}
             <View style={st.sectionCard}>
@@ -318,7 +341,9 @@ export default function ReportCardScreen({ route, navigation }) {
               )}
             </View>
           </>
-        ) : (
+        )}
+
+        {!isAnalyticsReady && (
           <View style={st.comingSoonCard}>
             <Text style={st.comingSoonTitle}>
               {STROKE_LABELS[strokeType] ?? strokeType} Analytics
@@ -548,6 +573,11 @@ const st = StyleSheet.create({
   namePlaceholder:  { fontSize: 14, color: '#555', fontStyle: 'italic', flex: 1 },
   nameEdit:         { fontSize: 13, color: '#666' },
   nameInput:        { fontSize: 15, fontWeight: '600', color: '#fff', paddingHorizontal: 20, paddingVertical: 6, marginBottom: 6, borderBottomWidth: 1, borderBottomColor: '#2563EB' },
+  viewToggle:       { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  viewBtn:          { flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: '#252525', borderWidth: 1, borderColor: '#333', alignItems: 'center' },
+  viewBtnActive:    { backgroundColor: '#2563EB', borderColor: '#2563EB' },
+  viewBtnText:      { fontSize: 13, fontWeight: '600', color: '#888' },
+  viewBtnTextActive:{ color: '#fff' },
   comingSoonCard:   { backgroundColor: '#1a1a1a', borderRadius: 12, padding: 20, marginBottom: 10, alignItems: 'center' },
   comingSoonTitle:  { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 8 },
   comingSoonText:   { fontSize: 13, color: '#888', textAlign: 'center', lineHeight: 20 },

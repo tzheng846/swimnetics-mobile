@@ -6,6 +6,7 @@ import {
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Buffer } from 'buffer';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import VelocityChart from '../components/VelocityChart';
 import { API_BASE } from '../config';
 import { useAuth } from '../context/AuthContext';
@@ -64,13 +65,28 @@ export default function RecordScreen({ route, navigation }) {
   useEffect(() => { deviceRef.current = connectedDevice; }, [connectedDevice]);
   const chipId = knownDevices.find(d => d.bleId === connectedDevice?.id)?.chipId ?? null;
 
-  // 'ready' | 'recording' | 'retrieving' | 'saving' | 'uploading' | 'results' | 'error'
+  // 'ready' | 'recording' | 'videoRecording' | 'retrieving' | 'saving' | 'uploading' | 'results' | 'error'
   const [bleState, setBleState] = useState('ready');
   const [sampleCount, setSampleCount] = useState(0);
   const [savedPath, setSavedPath]     = useState(null);
   const [apiResult, setApiResult]     = useState(null);
   const [elapsedS, setElapsedS]       = useState(0);
   const [sessionStartPhoneMs, setSessionStartPhoneMs] = useState(null);
+
+  // ── Video overlay capture (in-app camera + device, one tap) ──────────────────
+  const [camPermission, requestCamPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
+  const [videoMode, setVideoMode]             = useState(false); // camera UI mounted
+  const [videoUri, setVideoUri]               = useState(null);
+  const [videoStartPhoneMs, setVideoStartPhoneMs] = useState(null);
+  const cameraRef             = useRef(null);
+  const videoOrchestratedRef  = useRef(false); // onCameraReady can re-fire on remount
+  const stopRequestedRef      = useRef(false); // stop tapped before recordAsync started
+  const stopVideoRef          = useRef(null);  // lets onCameraReady auto-stop without a dep cycle
+
+  // On-screen error detail — console.log is invisible in a TestFlight build,
+  // so failures must surface in the UI to be debuggable at the pool.
+  const [errorMsg, setErrorMsg] = useState(null);
 
   const subscriptionRef = useRef(null);
   const samplesRef      = useRef([]);
@@ -103,11 +119,17 @@ export default function RecordScreen({ route, navigation }) {
       subscriptionRef.current?.remove();
       clearTimeout(stallTimerRef.current);
       clearInterval(elapsedTimerRef.current);
+      // Release the camera if the user navigates away mid-recording. The device
+      // keeps buffering on its own (retrievable later); the video file is lost.
+      try { cameraRef.current?.stopRecording(); } catch {}
     };
   }, []);
 
   // Mid-flow disconnect (context-level watcher) — device retains its buffer,
   // so the user can reconnect and Retrieve again.
+  // 'videoRecording' is deliberately NOT included: a BLE drop while filming must not
+  // kill the camera — the device keeps buffering on its own, and STOP/retrieval
+  // failures are handled gracefully when the user taps stop.
   useEffect(() => {
     if (connectionStatus !== 'connected'
         && (bleStateRef.current === 'recording' || bleStateRef.current === 'retrieving')) {
@@ -116,18 +138,23 @@ export default function RecordScreen({ route, navigation }) {
       clearTimeout(stallTimerRef.current);
       clearInterval(elapsedTimerRef.current);
       log('Device disconnected mid-flow — session is retained on the device', 'warn');
+      setErrorMsg('Device disconnected. The session is retained on the device — reconnect and tap Retrieve from Device.');
       setBleState('error');
     }
   }, [connectionStatus, log]);
 
   // ── BLE write helper ──────────────────────────────────────────────────────────
   const writeCmd = useCallback(async (cmd) => {
+    if (!deviceRef.current) {
+      // Without this, a disconnect surfaces as "Cannot read property ... of null"
+      throw new Error('Device not connected');
+    }
     await Promise.race([
       deviceRef.current.writeCharacteristicWithResponseForService(
         NUS_SERVICE, NUS_RX_CHAR,
         Buffer.from(cmd + '\n').toString('base64'),
       ),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('write timeout')), 3000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${cmd} write timeout`)), 3000)),
     ]);
   }, []);
 
@@ -175,6 +202,7 @@ export default function RecordScreen({ route, navigation }) {
         let msg = 'You have reached a plan limit.';
         try { msg = JSON.parse(result.body).detail || msg; } catch {}
         Alert.alert('Plan Limit Reached', msg + '\n\nVisit swimnetics.com to upgrade.', [{ text: 'OK' }]);
+        setErrorMsg(msg);
         setBleState('error');
         return;
       }
@@ -188,6 +216,7 @@ export default function RecordScreen({ route, navigation }) {
       setBleState('results');
     } catch (e) {
       log(`Upload failed: ${e.message}`, 'error');
+      setErrorMsg(`Upload failed: ${e.message}`);
       setBleState('error');
     }
   }, [log, athleteId, headWaistM, strokeType, sessionName, sessionNotes, chipId]);
@@ -217,6 +246,7 @@ export default function RecordScreen({ route, navigation }) {
       uploadAndProcess(path); // fire-and-forget — manages its own state transitions
     } catch (e) {
       log(`Save failed: ${e.message}`, 'error');
+      setErrorMsg(`Saving the session CSV failed: ${e.message}`);
       setBleState('error');
     }
   }, [log, saveCSV, uploadAndProcess]);
@@ -228,6 +258,7 @@ export default function RecordScreen({ route, navigation }) {
     setSampleCount(0);
     setSavedPath(null);
     setSessionStartPhoneMs(null);
+    setErrorMsg(null); // fresh attempt — drop any stale error detail
     setBleState('retrieving');
     log('Starting retrieval (META → DUMP)...');
 
@@ -308,6 +339,7 @@ export default function RecordScreen({ route, navigation }) {
       subscriptionRef.current?.remove();
       subscriptionRef.current = null;
       clearTimeout(stallTimerRef.current);
+      setErrorMsg(`Retrieval failed to start: ${e.message}`);
       setBleState('error');
     }
   }, [log, writeCmd, finishRetrieval]);
@@ -344,6 +376,124 @@ export default function RecordScreen({ route, navigation }) {
     runRetrieval(); // device holds the buffer — retrieve it now
   }, [log, writeCmd, runRetrieval]);
 
+  // ── Record with Video (one tap: device START + in-app camera together) ───────
+  // The app times its own camera, so videoStartPhoneMs is exact phone wall-clock.
+  // Sync at playback: video_origin_s = (sessionStartPhoneMs − videoStartPhoneMs)/1000.
+  const startVideoRecording = useCallback(async () => {
+    if (connectionStatus !== 'connected') {
+      Alert.alert('Not Connected', 'Reconnect to the device before recording.');
+      return;
+    }
+    if (!camPermission?.granted) {
+      const res = await requestCamPermission();
+      if (!res.granted) {
+        Alert.alert('Camera Needed',
+          'Camera access is required to record a swim video. Enable it in Settings → Swimnetics.');
+        return;
+      }
+    }
+    // Mic is optional — if denied, the video records muted (CameraView mute prop)
+    if (!micPermission?.granted) await requestMicPermission();
+
+    isStoppingRef.current = false;
+    stopRequestedRef.current = false;
+    setErrorMsg(null);
+    setSavedPath(null);
+    setApiResult(null);
+    setVideoUri(null);
+    setVideoStartPhoneMs(null);
+    videoOrchestratedRef.current = false;
+    setVideoMode(true); // mounts CameraView → onCameraReady runs the orchestration
+  }, [connectionStatus, camPermission, micPermission, requestCamPermission, requestMicPermission]);
+
+  // Failsafe: if onCameraReady never fires (camera in use / hardware issue),
+  // don't leave the user on an infinite "Starting camera…" spinner.
+  useEffect(() => {
+    if (!videoMode) return;
+    const t = setTimeout(() => {
+      if (!videoOrchestratedRef.current) {
+        log('Camera never became ready (10 s timeout)', 'error');
+        setErrorMsg('Camera failed to start (timed out after 10 s). Close other camera apps and try again.');
+        setVideoMode(false);
+        setBleState('error');
+      }
+    }, 10000);
+    return () => clearTimeout(t);
+  }, [videoMode, log]);
+
+  const onCameraReady = useCallback(async () => {
+    if (videoOrchestratedRef.current) return; // remount guard
+    videoOrchestratedRef.current = true;
+
+    try {
+      await writeCmd('START');
+      log('START sent — device is buffering', 'ok');
+    } catch (e) {
+      log(`START failed: ${e.message}`, 'error');
+      Alert.alert('Start Failed', e.message ?? 'Could not start the device.');
+      setVideoMode(false);
+      return;
+    }
+
+    // Timestamp at the recordAsync call. The camera has a small fixed warm-up
+    // (call → first frame); the overlay screen's ±nudge absorbs it.
+    const startMs = Date.now();
+    setVideoStartPhoneMs(startMs);
+    setElapsedS(0);
+    elapsedTimerRef.current = setInterval(
+      () => setElapsedS(Math.floor((Date.now() - startMs) / 1000)), 1000);
+    setBleState('videoRecording');
+    log(`Video recording started — videoStartPhoneMs=${startMs}`, 'ok');
+
+    try {
+      if (!cameraRef.current) throw new Error('camera unmounted before recording began');
+      // Resolves when stopRecording() is called (or maxDuration hits)
+      const recPromise = cameraRef.current.recordAsync({ maxDuration: 300 });
+      // Race fix: the Stop button is visible before recordAsync is invoked. If the
+      // user tapped Stop in that window, its stopRecording() was a no-op — issue it
+      // again now that recording has actually started.
+      if (stopRequestedRef.current) {
+        log('Stop was requested before recordAsync started — stopping now', 'warn');
+        cameraRef.current?.stopRecording();
+      }
+      const result = await recPromise;
+      if (result?.uri) {
+        setVideoUri(result.uri);
+        log(`Video saved: ${result.uri.split('/').pop()}`, 'ok');
+      } else {
+        log('Video recording ended without a file', 'warn');
+      }
+    } catch (e) {
+      log(`Video recording failed: ${e.message}`, 'error');
+    } finally {
+      setVideoMode(false); // unmount camera only after recordAsync settles
+      // Failsafe: recordAsync can resolve on its own (maxDuration, camera
+      // interruption). Without this the screen dead-ends in 'videoRecording'
+      // with no STOP sent and no retrieval.
+      if (!isStoppingRef.current) {
+        log('Recording ended on its own — running the stop flow', 'warn');
+        stopVideoRef.current?.();
+      }
+    }
+  }, [writeCmd, log]);
+
+  const stopVideoRecording = useCallback(async () => {
+    if (isStoppingRef.current) { log('stopVideoRecording called twice — ignoring', 'warn'); return; }
+    isStoppingRef.current = true;
+    stopRequestedRef.current = true; // covers the pre-recordAsync window (see onCameraReady)
+    clearInterval(elapsedTimerRef.current);
+    try { cameraRef.current?.stopRecording(); } catch {} // resolves the recordAsync above
+    try {
+      await writeCmd('STOP');
+      log('STOP sent', 'ok');
+    } catch (e) {
+      // Non-fatal: device caps its own buffer; session is retained for retrieval
+      log(`STOP failed (non-fatal): ${e.message}`, 'warn');
+    }
+    runRetrieval(); // device holds the buffer — retrieve it now
+  }, [log, writeCmd, runRetrieval]);
+  stopVideoRef.current = stopVideoRecording; // keep the auto-stop failsafe current
+
   // ── Reset ─────────────────────────────────────────────────────────────────────
   const reset = useCallback(() => {
     subscriptionRef.current?.remove();
@@ -359,6 +509,12 @@ export default function RecordScreen({ route, navigation }) {
     setMarkerLabel('');
     setSessionStartPhoneMs(null);
     setElapsedS(0);
+    setVideoMode(false);
+    setVideoUri(null);
+    setVideoStartPhoneMs(null);
+    videoOrchestratedRef.current = false;
+    stopRequestedRef.current = false;
+    setErrorMsg(null);
     log('--- Reset ---');
     setBleState('ready'); // connection lives in BleContext — nothing to rescan
   }, [log]);
@@ -387,7 +543,7 @@ export default function RecordScreen({ route, navigation }) {
 
       <View style={{ flex: 1 }}>
       {/* Device not connected — connection is managed in Config/Devices screens */}
-      {notConnected && preResultState && (
+      {!videoMode && notConnected && preResultState && (
         <View style={styles.statusArea}>
           <Text style={[styles.statusText, { color: '#C0392B' }]}>⚠ Device not connected</Text>
           <Text style={styles.hintText}>
@@ -400,13 +556,46 @@ export default function RecordScreen({ route, navigation }) {
         </View>
       )}
 
+      {/* CAMERA — Record with Video mode (device buffers while the app films) */}
+      {videoMode && (
+        <View style={styles.cameraWrap}>
+          <CameraView
+            ref={cameraRef}
+            style={styles.camera}
+            mode="video"
+            facing="back"
+            mute={!micPermission?.granted}
+            onCameraReady={onCameraReady}
+          />
+          <View style={styles.cameraControls}>
+            {bleState === 'videoRecording' ? (
+              <>
+                <Text style={styles.cameraTimer}>{fmtElapsed(elapsedS)}</Text>
+                <TouchableOpacity style={styles.stopBtn} onPress={stopVideoRecording}>
+                  <Text style={styles.btnText}>Stop</Text>
+                </TouchableOpacity>
+                <Text style={styles.hintText}>Device + camera are recording together.</Text>
+              </>
+            ) : (
+              <View style={styles.row}>
+                <ActivityIndicator color="#1E3A5F" />
+                <Text style={styles.statusText}> Starting camera…</Text>
+              </View>
+            )}
+          </View>
+        </View>
+      )}
+
       {/* STATUS AREA — hidden during results to avoid wasting space */}
-      {!(notConnected && preResultState) && bleState !== 'results' && <View style={styles.statusArea}>
+      {!videoMode && !(notConnected && preResultState) && bleState !== 'results' && <View style={styles.statusArea}>
         {bleState === 'ready' && (
           <>
             <Text style={[styles.statusText, { color: '#27AE60' }]}>✓ {deviceLabel} connected</Text>
             <TouchableOpacity style={styles.primaryBtn} onPress={startRecording}>
               <Text style={styles.btnText}>Start Recording</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.secondaryBtn} onPress={startVideoRecording}>
+              <Text style={styles.secondaryBtnText}>Record with Video</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.secondaryBtn} onPress={runRetrieval}>
               <Text style={styles.secondaryBtnText}>Retrieve from Device</Text>
@@ -460,6 +649,8 @@ export default function RecordScreen({ route, navigation }) {
             <Text style={[styles.statusText, { color: '#C0392B', marginBottom: 4 }]}>
               ⚠ Recording error
             </Text>
+            {/* Actual cause — console logs are unreadable in a TestFlight build */}
+            {errorMsg && <Text style={styles.errorDetail}>{errorMsg}</Text>}
             {savedPath && <Text style={styles.pathText}>{savedPath.split('/').pop()}</Text>}
             <Text style={styles.hintText}>
               If the device still holds the session, reconnect and tap Retrieve from Device.
@@ -575,6 +766,29 @@ export default function RecordScreen({ route, navigation }) {
 
           {/* ── Data Quality ── */}
           <DataQualityCard dataQuality={apiResult.data_quality} />
+
+          {/* ── Video overlay ── */}
+          {videoUri && videoStartPhoneMs != null && sessionStartPhoneMs != null && (
+            <TouchableOpacity
+              style={styles.overlayBtn}
+              onPress={() => navigation.navigate('VideoOverlay', {
+                time: apiResult.time,
+                velocity: apiResult.velocity,
+                sessionStartPhoneMs,
+                videoUri,
+                videoStartPhoneMs,
+              })}
+            >
+              <Text style={styles.btnText}>▶ View Video Overlay</Text>
+            </TouchableOpacity>
+          )}
+          {/* A video was expected but the file never materialized — say so instead
+              of silently omitting the button */}
+          {!videoUri && videoStartPhoneMs != null && (
+            <Text style={[styles.saveStatus, styles.saveWarn]}>
+              ⚠ Video unavailable — the camera recording did not produce a file
+            </Text>
+          )}
 
           {/* ── Sync reference (video overlay) ── */}
           {sessionStartPhoneMs != null && (
@@ -732,6 +946,7 @@ const styles = StyleSheet.create({
   counterLabel: { fontSize: 14, color: '#7F8C8D', marginTop: 20 },
   counter:      { fontSize: 56, fontWeight: '700', color: '#1E3A5F' },
   pathText:     { fontSize: 12, color: '#95A5A6', marginTop: 4, textAlign: 'center' },
+  errorDetail:  { fontSize: 13, color: '#C0392B', marginTop: 4, textAlign: 'center', paddingHorizontal: 8 },
   sectionCard:  { backgroundColor: '#FFF', borderRadius: 12, padding: 14, marginBottom: 10 },
   sectionTitle: { fontSize: 11, color: '#7F8C8D', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
   metricRow:    { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
@@ -756,6 +971,11 @@ const styles = StyleSheet.create({
   noDetectText:    { fontSize: 13, color: '#95A5A6', fontStyle: 'italic', marginTop: 2 },
   unreliableWarn:  { fontSize: 13, color: '#E67E22', fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
   syncLine:     { fontSize: 11, color: '#95A5A6', textAlign: 'center', marginTop: 10 },
+  cameraWrap:   { flex: 1, paddingHorizontal: 20 },
+  camera:       { width: '100%', aspectRatio: 3 / 4, borderRadius: 12, overflow: 'hidden' },
+  cameraControls: { alignItems: 'center', paddingTop: 8 },
+  cameraTimer:  { fontSize: 40, fontWeight: '700', color: '#1E3A5F' },
+  overlayBtn:   { backgroundColor: '#2196F3', borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
   saveStatus:   { fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 4 },
   saveOk:       { color: '#27AE60' },
   saveWarn:     { color: '#E67E22' },

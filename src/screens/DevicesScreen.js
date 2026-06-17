@@ -232,6 +232,11 @@ export default function DevicesScreen({ navigation }) {
         </TouchableOpacity>
       ))}
 
+      {/* Diagnostics — live magnet/wiring/buffer/link health for the connected device */}
+      <TouchableOpacity style={st.diagBtn} onPress={() => navigation.navigate('Diagnostics')}>
+        <Text style={st.diagBtnText}>🔧 Run Diagnostics</Text>
+      </TouchableOpacity>
+
       {/* Divider */}
       <View style={st.divider} />
       <Text style={st.sectionLabel}>REGISTERED DEVICES</Text>
@@ -295,6 +300,10 @@ const st = StyleSheet.create({
   cancelText:    { color: '#C0392B', fontSize: 13, fontWeight: '600' },
   foundItem:     { backgroundColor: '#252525', borderRadius: 8, padding: 12, marginBottom: 8, marginTop: 4 },
   foundName:     { color: '#fff', fontSize: 15, fontWeight: '500' },
+
+  // Diagnostics entry
+  diagBtn:       { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333', borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 12 },
+  diagBtnText:   { color: '#fff', fontSize: 14, fontWeight: '600' },
 
   // Registered device cards
   card:          { backgroundColor: '#1a1a1a', borderRadius: 10, padding: 16, marginBottom: 12 },

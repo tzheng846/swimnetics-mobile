@@ -12,6 +12,8 @@ import SessionHistoryScreen from './src/screens/SessionHistoryScreen';
 import ReportCardScreen from './src/screens/ReportCardScreen';
 import RecordingConfigScreen from './src/screens/RecordingConfigScreen';
 import DevicesScreen from './src/screens/DevicesScreen';
+import DiagnosticsScreen from './src/screens/DiagnosticsScreen';
+import VideoOverlayScreen from './src/screens/VideoOverlayScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -36,6 +38,8 @@ function Navigation() {
           <Stack.Screen name="SessionHistory" component={SessionHistoryScreen} />
           <Stack.Screen name="ReportCard" component={ReportCardScreen} />
           <Stack.Screen name="Devices" component={DevicesScreen} />
+          <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
+          <Stack.Screen name="VideoOverlay" component={VideoOverlayScreen} />
         </>
       ) : (
         <Stack.Screen name="Login" component={LoginScreen} />

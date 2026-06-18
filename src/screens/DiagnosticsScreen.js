@@ -45,6 +45,16 @@ function parseStatus(base64) {
 // Plain-English magnet verdict from the status byte. This is the whole point of the
 // screen — translate, don't dump hex.
 function magnetVerdict(statusByte) {
+  // A non-responding AS5600 (unwired / bad I2C bus) reads back as 0xFF, which sets MD, ML
+  // AND MH at once. "Too weak AND too strong" is physically impossible, so treat that combo
+  // (and an all-ones byte) as a wiring fault — NOT a magnet-position problem.
+  if (statusByte === 0xFF || ((statusByte & ML_BIT) && (statusByte & MH_BIT))) {
+    return {
+      color: '#C0392B',
+      title: 'SENSOR NOT RESPONDING',
+      detail: 'The AS5600 isn’t answering on I2C — check its wiring (SDA→GPIO21, SCL→GPIO22, plus 3V3 and GND). This is a wiring fault, not a magnet position problem.',
+    };
+  }
   if (!(statusByte & MD_BIT)) {
     return {
       color: '#C0392B',

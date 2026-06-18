@@ -85,6 +85,15 @@ export function BleProvider({ children }) {
   };
 
   const forgetDevice = async (bleId) => {
+    // If we're forgetting the device we're currently connected to, drop the BLE link too —
+    // otherwise the radio stays connected (device LED stays on) and our state goes stale.
+    if (connectedDevice?.id === bleId) {
+      disconnectListenerRef.current?.remove();
+      disconnectListenerRef.current = null;
+      await connectedDevice.cancelConnection().catch(() => {});
+      setConnectedDevice(null);
+      setConnectionStatus('disconnected');
+    }
     const updated = knownDevices.filter(d => d.bleId !== bleId);
     await _persistDevices(updated);
   };

@@ -8,8 +8,11 @@ import VelocityChart from '../components/VelocityChart';
 import { supabase } from '../lib/supabase';
 import DataQualityCard from '../components/DataQualityCard';
 import PillarCards from '../components/PillarCards';
+import AiBubble from '../components/ai/AiBubble';
 import { useAuth } from '../context/AuthContext';
+import { useUnits } from '../context/UnitsContext';
 import { API_BASE } from '../config';
+import { colors } from '../theme';
 
 // ── SESSION summary card (top of report) ─────────────────────────────────────
 function SessionSummaryCard({ metrics, unit }) {
@@ -49,13 +52,13 @@ function SessionSummaryCard({ metrics, unit }) {
   );
 }
 const ssc = StyleSheet.create({
-  card:     { backgroundColor: '#1a1a1a', borderRadius: 10, padding: 16, marginBottom: 16 },
-  label:    { color: '#555', fontSize: 11, fontWeight: '600', letterSpacing: 1, marginBottom: 12 },
+  card:     { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 16, marginBottom: 16 },
+  label:    { color: colors.textSecondary, fontSize: 11, fontWeight: '600', letterSpacing: 1, marginBottom: 12 },
   row:      { flexDirection: 'row' },
   col:      { flex: 1, alignItems: 'center' },
-  colLabel: { color: '#666', fontSize: 10, fontWeight: '600', letterSpacing: 0.5, marginBottom: 4 },
-  colValue: { color: '#fff', fontSize: 22, fontWeight: '700' },
-  colUnit:  { color: '#555', fontSize: 11, marginTop: 2 },
+  colLabel: { color: colors.textSecondary, fontSize: 10, fontWeight: '600', letterSpacing: 0.5, marginBottom: 4 },
+  colValue: { color: colors.text, fontSize: 22, fontWeight: '700' },
+  colUnit:  { color: colors.textMuted, fontSize: 11, marginTop: 2 },
 });
 
 export default function ReportCardScreen({ route, navigation }) {
@@ -70,7 +73,9 @@ export default function ReportCardScreen({ route, navigation }) {
   const [editingName, setEditingName] = useState(false);
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [markerLabel, setMarkerLabel] = useState('');
-  const [unit, setUnit] = useState('metric');
+  const [prevSessionId, setPrevSessionId] = useState(null);
+  const { unit: unitPref, setUnit: setUnitPref } = useUnits();  // global m/yd pref (Settings)
+  const unit = unitPref === 'yd' ? 'imperial' : 'metric';        // local convention kept
   const [view, setView] = useState('simple');   // 'simple' = pillar cards, 'advanced' = raw metrics
   const [scrollEnabled, setScrollEnabled] = useState(true);
   const scrollViewRef = useRef(null);
@@ -83,7 +88,7 @@ export default function ReportCardScreen({ route, navigation }) {
       try {
         const { data, error: err } = await supabase
           .from('sessions')
-          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type')
+          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at')
           .eq('id', sessionId)
           .single();
         if (err) throw err;
@@ -92,6 +97,17 @@ export default function ReportCardScreen({ route, navigation }) {
         setIsStarred(data.is_starred ?? false);
         setNotes(data.notes ?? null);
         setStrokeType(data.stroke_type ?? null);
+        // Find this athlete's previous session (for "compare to previous").
+        if (data.athlete_id && data.created_at) {
+          const { data: prev } = await supabase
+            .from('sessions')
+            .select('id')
+            .eq('athlete_id', data.athlete_id)
+            .lt('created_at', data.created_at)
+            .order('created_at', { ascending: false })
+            .limit(1);
+          setPrevSessionId(prev?.[0]?.id ?? null);
+        }
       } catch (e) {
         setError('Failed to load session.');
       } finally {
@@ -104,7 +120,7 @@ export default function ReportCardScreen({ route, navigation }) {
   if (loading) {
     return (
       <SafeAreaView style={st.container}>
-        <ActivityIndicator color="#2196F3" style={{ marginTop: 80 }} />
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 80 }} />
       </SafeAreaView>
     );
   }
@@ -118,7 +134,7 @@ export default function ReportCardScreen({ route, navigation }) {
           </TouchableOpacity>
           <View style={{ width: 60 }} />
         </View>
-        <Text style={{ color: '#C0392B', textAlign: 'center', marginTop: 40 }}>
+        <Text style={{ color: colors.needsWork, textAlign: 'center', marginTop: 40 }}>
           {error ?? 'Failed to load session.'}
         </Text>
       </SafeAreaView>
@@ -129,6 +145,13 @@ export default function ReportCardScreen({ route, navigation }) {
   const vel = sessionData.velocity_profile ?? [];
   const dist = sessionData.distance_profile ?? [];
   const time = Array.from({ length: vel.length }, (_, i) => i / 100);
+
+  // Advanced-only: cycle boundary times (idx/100) for the segmentation overlay on the chart.
+  const cycleBoundaries = view === 'advanced'
+    ? Array.from(new Set(
+        (metrics.cycles ?? []).flatMap(c => [c.start_idx, c.end_idx].filter(x => x != null)),
+      )).sort((a, b) => a - b).map(i => i / 100)
+    : [];
 
   const unitFactor = unit === 'imperial' ? 1.09361 : 1;
   const distUnit   = unit === 'imperial' ? 'yd' : 'm';
@@ -197,6 +220,30 @@ export default function ReportCardScreen({ route, navigation }) {
     }
   }
 
+  function confirmDelete() {
+    Alert.alert(
+      'Delete session',
+      `Delete this session${sessionName ? ` "${sessionName}"` : ''}? This cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete', style: 'destructive',
+          onPress: async () => {
+            try {
+              await fetch(`${API_BASE}/sessions/${sessionId}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${authSession?.access_token}` },
+              });
+            } catch {
+              // best-effort; the list refetches on focus
+            }
+            navigation.goBack();
+          },
+        },
+      ],
+    );
+  }
+
   return (
     <SafeAreaView style={st.container}>
       <View style={st.header}>
@@ -217,6 +264,9 @@ export default function ReportCardScreen({ route, navigation }) {
               {isStarred ? '★' : '☆'}
             </Text>
           </TouchableOpacity>
+          <TouchableOpacity onPress={confirmDelete} style={st.starBtn} accessibilityLabel="Delete session">
+            <Text style={st.deleteGlyph}>🗑</Text>
+          </TouchableOpacity>
           <TouchableOpacity onPress={exportCsv} style={st.exportBtn}>
             <Text style={st.exportBtnText}>Export</Text>
           </TouchableOpacity>
@@ -235,7 +285,7 @@ export default function ReportCardScreen({ route, navigation }) {
             patchSession({ name: sessionName?.trim() || null });
           }}
           placeholder="Session name…"
-          placeholderTextColor="#888"
+          placeholderTextColor={colors.textMuted}
           autoFocus
           autoCapitalize="sentences"
           returnKeyType="done"
@@ -279,7 +329,7 @@ export default function ReportCardScreen({ route, navigation }) {
         )}
 
         {isAnalyticsReady && view === 'simple' && (
-          <PillarCards sessionId={sessionId} token={authSession?.access_token} />
+          <PillarCards sessionId={sessionId} token={authSession?.access_token} unit={unit} />
         )}
 
         {isAnalyticsReady && view === 'advanced' && (
@@ -329,7 +379,6 @@ export default function ReportCardScreen({ route, navigation }) {
                 <>
                   <View style={st.metricRow}>
                     <MetricItem label="Dist/Stroke" value={fmtDist(metrics.session?.mean_dps_m)}    unit={distUnit} />
-                    <MetricItem label="Impulse"     value={fmtDist(metrics.session?.mean_impulse_m)} unit={distUnit} />
                     <MetricItem label="Coast"       value={metrics.session?.mean_coast_fraction != null ? (metrics.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
                   </View>
                   <View style={st.metricRow}>
@@ -354,19 +403,28 @@ export default function ReportCardScreen({ route, navigation }) {
           </View>
         )}
 
+        {prevSessionId && (
+          <TouchableOpacity
+            style={st.compareBtn}
+            onPress={() => navigation.navigate('Compare', { sessionIds: [prevSessionId, sessionId] })}
+          >
+            <Text style={st.compareBtnText}>⇄ Compare to previous</Text>
+          </TouchableOpacity>
+        )}
+
         {/* Velocity Chart */}
         <View style={st.chartHeader}>
           <Text style={st.chartTitle}>Velocity</Text>
           <View style={st.unitToggle}>
             <TouchableOpacity
               style={[st.unitBtn, unit === 'metric' && st.unitBtnActive]}
-              onPress={() => setUnit('metric')}
+              onPress={() => setUnitPref('m')}
             >
               <Text style={[st.unitBtnText, unit === 'metric' && st.unitBtnTextActive]}>m</Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[st.unitBtn, unit === 'imperial' && st.unitBtnActive]}
-              onPress={() => setUnit('imperial')}
+              onPress={() => setUnitPref('yd')}
             >
               <Text style={[st.unitBtnText, unit === 'imperial' && st.unitBtnTextActive]}>yd</Text>
             </TouchableOpacity>
@@ -380,9 +438,15 @@ export default function ReportCardScreen({ route, navigation }) {
           unitFactor={unitFactor}
           unitLabel={velUnit}
           interactive
+          cycleBoundaries={cycleBoundaries}
           onInteractionStart={() => setScrollEnabled(false)}
           onInteractionEnd={() => setScrollEnabled(true)}
         />
+        {cycleBoundaries.length > 0 && (
+          <Text style={st.chartCaption}>
+            Dashed lines = detected stroke cycles. Segmentation is experimental.
+          </Text>
+        )}
 
         {isAnalyticsReady && (
           <View style={st.sectionCard}>
@@ -411,7 +475,7 @@ export default function ReportCardScreen({ route, navigation }) {
             onBlur={() => patchSession({ notes: notes?.trim() || null })}
             onFocus={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
             placeholder="Add coaching notes…"
-            placeholderTextColor="#555"
+            placeholderTextColor={colors.textMuted}
             multiline
             numberOfLines={4}
             textAlignVertical="top"
@@ -421,6 +485,7 @@ export default function ReportCardScreen({ route, navigation }) {
 
       </ScrollView>
       </KeyboardAvoidingView>
+      <AiBubble anchorSessionId={sessionId} token={authSession?.access_token} />
     </SafeAreaView>
   );
 }
@@ -534,52 +599,56 @@ function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0, onMarkerChang
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const st = StyleSheet.create({
-  container:       { flex: 1, backgroundColor: '#000' },
+  container:       { flex: 1, backgroundColor: colors.bg },
   header:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 8 },
-  headerTitle:     { fontSize: 18, fontWeight: '700', color: '#fff' },
-  back:            { fontSize: 14, color: '#2196F3' },
+  headerTitle:     { fontSize: 18, fontWeight: '700', color: colors.text },
+  back:            { fontSize: 14, color: colors.primary },
   exportBtn:       { paddingHorizontal: 10, paddingVertical: 4 },
-  exportBtnText:   { fontSize: 14, color: '#2196F3' },
-  dateLabel:       { fontSize: 13, color: '#888', textAlign: 'center', marginBottom: 8 },
-  sectionCard:     { backgroundColor: '#1a1a1a', borderRadius: 12, padding: 14, marginBottom: 10 },
-  sectionTitle:    { fontSize: 11, color: '#666', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  exportBtnText:   { fontSize: 14, color: colors.primary },
+  dateLabel:       { fontSize: 13, color: colors.textSecondary, textAlign: 'center', marginBottom: 8 },
+  sectionCard:     { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 14, marginBottom: 10 },
+  sectionTitle:    { fontSize: 11, color: colors.textSecondary, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
   metricRow:       { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  metricLabel:     { fontSize: 11, color: '#666', textTransform: 'uppercase', letterSpacing: 0.5 },
-  metricValue:     { fontSize: 22, fontWeight: '700', color: '#fff', marginTop: 2 },
-  metricUnit:      { fontSize: 11, color: '#555' },
+  metricLabel:     { fontSize: 11, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  metricValue:     { fontSize: 22, fontWeight: '700', color: colors.text, marginTop: 2 },
+  metricUnit:      { fontSize: 11, color: colors.textMuted },
   chartHeader:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 6 },
-  chartTitle:      { fontSize: 11, fontWeight: '600', color: '#666', textTransform: 'uppercase', letterSpacing: 1 },
+  chartTitle:      { fontSize: 11, fontWeight: '600', color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 1 },
+  chartCaption:    { fontSize: 11, color: colors.textMuted, fontStyle: 'italic', textAlign: 'center', marginTop: 6 },
   unitToggle:      { flexDirection: 'row', gap: 6 },
-  unitBtn:         { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, backgroundColor: '#252525', borderWidth: 1, borderColor: '#333' },
-  unitBtnActive:   { backgroundColor: '#2563EB', borderColor: '#2563EB' },
-  unitBtnText:     { fontSize: 12, fontWeight: '600', color: '#888' },
-  unitBtnTextActive: { color: '#fff' },
-  noDetectText:    { fontSize: 13, color: '#888', fontStyle: 'italic', marginTop: 2 },
-  unreliableWarn:  { fontSize: 13, color: '#E67E22', fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
-  ttxValue:        { fontSize: 42, fontWeight: '700', color: '#fff' },
-  ttxLabel:        { fontSize: 14, color: '#888', marginBottom: 4 },
-  ttxMax:          { fontSize: 11, color: '#666', marginBottom: 12 },
+  unitBtn:         { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  unitBtnActive:   { backgroundColor: colors.primary, borderColor: colors.primary },
+  unitBtnText:     { fontSize: 12, fontWeight: '600', color: colors.textSecondary },
+  unitBtnTextActive: { color: colors.white },
+  noDetectText:    { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
+  unreliableWarn:  { fontSize: 13, color: colors.ok, fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
+  ttxValue:        { fontSize: 42, fontWeight: '700', color: colors.text },
+  ttxLabel:        { fontSize: 14, color: colors.textSecondary, marginBottom: 4 },
+  ttxMax:          { fontSize: 11, color: colors.textMuted, marginBottom: 12 },
   ttxButtons:      { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 4 },
-  ttxBtn:          { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#252525', borderWidth: 1, borderColor: '#333' },
-  ttxBtnActive:    { backgroundColor: '#2563EB', borderColor: '#2563EB' },
-  ttxBtnText:      { fontSize: 14, fontWeight: '600', color: '#888' },
-  ttxBtnTextActive: { color: '#fff' },
+  ttxBtn:          { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  ttxBtnActive:    { backgroundColor: colors.primary, borderColor: colors.primary },
+  ttxBtnText:      { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  ttxBtnTextActive: { color: colors.white },
   headerRight:      { flexDirection: 'row', alignItems: 'center', gap: 4 },
   starBtn:          { paddingHorizontal: 8, paddingVertical: 4 },
-  starBtnText:      { fontSize: 20, color: '#555' },
-  starBtnTextActive:{ color: '#F39C12' },
+  starBtnText:      { fontSize: 20, color: colors.textMuted },
+  starBtnTextActive:{ color: colors.ok },
+  deleteGlyph:      { fontSize: 18, color: colors.needsWork },
   nameRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, marginBottom: 6, gap: 6 },
-  nameText:         { fontSize: 15, fontWeight: '600', color: '#fff', flex: 1 },
-  namePlaceholder:  { fontSize: 14, color: '#555', fontStyle: 'italic', flex: 1 },
-  nameEdit:         { fontSize: 13, color: '#666' },
-  nameInput:        { fontSize: 15, fontWeight: '600', color: '#fff', paddingHorizontal: 20, paddingVertical: 6, marginBottom: 6, borderBottomWidth: 1, borderBottomColor: '#2563EB' },
+  nameText:         { fontSize: 15, fontWeight: '600', color: colors.text, flex: 1 },
+  namePlaceholder:  { fontSize: 14, color: colors.textMuted, fontStyle: 'italic', flex: 1 },
+  nameEdit:         { fontSize: 13, color: colors.periwinkle },
+  nameInput:        { fontSize: 15, fontWeight: '600', color: colors.text, paddingHorizontal: 20, paddingVertical: 6, marginBottom: 6, borderBottomWidth: 1, borderBottomColor: colors.primary },
   viewToggle:       { flexDirection: 'row', gap: 8, marginBottom: 12 },
-  viewBtn:          { flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: '#252525', borderWidth: 1, borderColor: '#333', alignItems: 'center' },
-  viewBtnActive:    { backgroundColor: '#2563EB', borderColor: '#2563EB' },
-  viewBtnText:      { fontSize: 13, fontWeight: '600', color: '#888' },
-  viewBtnTextActive:{ color: '#fff' },
-  comingSoonCard:   { backgroundColor: '#1a1a1a', borderRadius: 12, padding: 20, marginBottom: 10, alignItems: 'center' },
-  comingSoonTitle:  { fontSize: 15, fontWeight: '700', color: '#fff', marginBottom: 8 },
-  comingSoonText:   { fontSize: 13, color: '#888', textAlign: 'center', lineHeight: 20 },
-  notesInput:       { fontSize: 14, color: '#ddd', minHeight: 88, paddingTop: 4, lineHeight: 20 },
+  viewBtn:          { flex: 1, paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border, alignItems: 'center' },
+  viewBtnActive:    { backgroundColor: colors.primary, borderColor: colors.primary },
+  viewBtnText:      { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  viewBtnTextActive:{ color: colors.white },
+  comingSoonCard:   { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 20, marginBottom: 10, alignItems: 'center' },
+  comingSoonTitle:  { fontSize: 15, fontWeight: '700', color: colors.text, marginBottom: 8 },
+  comingSoonText:   { fontSize: 13, color: colors.textSecondary, textAlign: 'center', lineHeight: 20 },
+  notesInput:       { fontSize: 14, color: colors.text, minHeight: 88, paddingTop: 4, lineHeight: 20 },
+  compareBtn:       { borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingVertical: 12, alignItems: 'center', marginBottom: 12 },
+  compareBtnText:   { fontSize: 13, fontWeight: '600', color: colors.primary },
 });

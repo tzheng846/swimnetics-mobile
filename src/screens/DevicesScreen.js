@@ -7,6 +7,7 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
 import { API_BASE } from '../config';
+import { colors } from '../theme';
 
 export default function DevicesScreen({ navigation }) {
   const { session } = useAuth();
@@ -210,7 +211,7 @@ export default function DevicesScreen({ navigation }) {
         </TouchableOpacity>
       ) : (
         <View style={st.scanningRow}>
-          <ActivityIndicator color="#2196F3" />
+          <ActivityIndicator color={colors.primary} />
           <Text style={st.scanningText}> Scanning for SwimLogger…</Text>
           <TouchableOpacity onPress={cancelPairScan} style={{ marginLeft: 8 }}>
             <Text style={st.cancelText}>Cancel</Text>
@@ -226,7 +227,7 @@ export default function DevicesScreen({ navigation }) {
           disabled={pairConnecting === d.id}
         >
           {pairConnecting === d.id
-            ? <ActivityIndicator color="#2196F3" />
+            ? <ActivityIndicator color={colors.primary} />
             : <Text style={st.foundName}>{d.name}</Text>
           }
         </TouchableOpacity>
@@ -254,7 +255,7 @@ export default function DevicesScreen({ navigation }) {
       </View>
 
       {loading ? (
-        <ActivityIndicator color="#2196F3" style={{ marginTop: 40 }} />
+        <ActivityIndicator color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
         <FlatList
           data={devices}
@@ -275,47 +276,47 @@ export default function DevicesScreen({ navigation }) {
 }
 
 const st = StyleSheet.create({
-  container:     { flex: 1, backgroundColor: '#000' },
+  container:     { flex: 1, backgroundColor: colors.bg },
   header:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 16 },
-  back:          { color: '#2196F3', fontSize: 14, width: 80 },
-  title:         { color: '#fff', fontSize: 15, fontWeight: '700', letterSpacing: 1 },
+  back:          { color: colors.primary, fontSize: 14, width: 80 },
+  title:         { color: colors.text, fontSize: 15, fontWeight: '700', letterSpacing: 1 },
 
   // Section labels
-  sectionLabel:  { color: '#888', fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10, marginTop: 4 },
-  divider:       { borderTopWidth: 1, borderTopColor: '#222', marginVertical: 16 },
+  sectionLabel:  { color: colors.textSecondary, fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10, marginTop: 4 },
+  divider:       { borderTopWidth: 1, borderTopColor: colors.border, marginVertical: 16 },
 
   // Paired devices list
-  emptyPaired:   { color: '#555', fontSize: 13, marginBottom: 8 },
-  pairedRow:     { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: '#222' },
-  connectedDot:  { width: 8, height: 8, borderRadius: 4, backgroundColor: '#27AE60', marginRight: 8 },
-  pairedName:    { color: '#fff', fontSize: 15, fontWeight: '500' },
-  pairedChip:    { color: '#555', fontSize: 11, marginTop: 2 },
-  forgetBtn:     { color: '#C0392B', fontSize: 12, fontWeight: '600', paddingHorizontal: 4 },
+  emptyPaired:   { color: colors.textMuted, fontSize: 13, marginBottom: 8 },
+  pairedRow:     { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.border },
+  connectedDot:  { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.good, marginRight: 8 },
+  pairedName:    { color: colors.text, fontSize: 15, fontWeight: '500' },
+  pairedChip:    { color: colors.textMuted, fontSize: 11, marginTop: 2 },
+  forgetBtn:     { color: colors.needsWork, fontSize: 12, fontWeight: '600', paddingHorizontal: 4 },
 
   // Scan UI
-  pairBtn:       { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333', borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 10, marginBottom: 4 },
-  pairBtnText:   { color: '#2196F3', fontSize: 14, fontWeight: '600' },
+  pairBtn:       { backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 10, marginBottom: 4 },
+  pairBtnText:   { color: colors.primary, fontSize: 14, fontWeight: '600' },
   scanningRow:   { flexDirection: 'row', alignItems: 'center', paddingVertical: 12 },
-  scanningText:  { color: '#aaa', fontSize: 14 },
-  cancelText:    { color: '#C0392B', fontSize: 13, fontWeight: '600' },
-  foundItem:     { backgroundColor: '#252525', borderRadius: 8, padding: 12, marginBottom: 8, marginTop: 4 },
-  foundName:     { color: '#fff', fontSize: 15, fontWeight: '500' },
+  scanningText:  { color: colors.textSecondary, fontSize: 14 },
+  cancelText:    { color: colors.needsWork, fontSize: 13, fontWeight: '600' },
+  foundItem:     { backgroundColor: colors.surfaceAlt, borderRadius: 8, padding: 12, marginBottom: 8, marginTop: 4 },
+  foundName:     { color: colors.text, fontSize: 15, fontWeight: '500' },
 
   // Diagnostics entry
-  diagBtn:       { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333', borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 12 },
-  diagBtnText:   { color: '#fff', fontSize: 14, fontWeight: '600' },
+  diagBtn:       { backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 12 },
+  diagBtnText:   { color: colors.text, fontSize: 14, fontWeight: '600' },
 
   // Registered device cards
-  card:          { backgroundColor: '#1a1a1a', borderRadius: 10, padding: 16, marginBottom: 12 },
+  card:          { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 16, marginBottom: 12 },
   cardTop:       { marginBottom: 14 },
-  deviceName:    { color: '#fff', fontSize: 17, fontWeight: '600' },
-  nameInput:     { color: '#fff', fontSize: 17, fontWeight: '600', borderBottomWidth: 1, borderBottomColor: '#2563EB', paddingVertical: 2 },
-  chipId:        { color: '#555', fontSize: 11, marginTop: 4 },
+  deviceName:    { color: colors.text, fontSize: 17, fontWeight: '600' },
+  nameInput:     { color: colors.text, fontSize: 17, fontWeight: '600', borderBottomWidth: 1, borderBottomColor: colors.primary, paddingVertical: 2 },
+  chipId:        { color: colors.textMuted, fontSize: 11, marginTop: 4 },
   statsRow:      { flexDirection: 'row', marginBottom: 14 },
   statCol:       { flex: 1 },
-  statLabel:     { color: '#666', fontSize: 10, fontWeight: '600', letterSpacing: 0.5, marginBottom: 4 },
-  statValue:     { color: '#fff', fontSize: 14, fontWeight: '600' },
+  statLabel:     { color: colors.textSecondary, fontSize: 10, fontWeight: '600', letterSpacing: 0.5, marginBottom: 4 },
+  statValue:     { color: colors.text, fontSize: 14, fontWeight: '600' },
   removeBtn:     { alignSelf: 'flex-end' },
-  removeBtnText: { color: '#C0392B', fontSize: 13, fontWeight: '600' },
-  empty:         { color: '#555', textAlign: 'center', marginTop: 20, lineHeight: 22 },
+  removeBtnText: { color: colors.needsWork, fontSize: 13, fontWeight: '600' },
+  empty:         { color: colors.textMuted, textAlign: 'center', marginTop: 20, lineHeight: 22 },
 });

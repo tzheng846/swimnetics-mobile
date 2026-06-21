@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import VelocityChart from '../components/VelocityChart';
+import { colors } from '../theme';
 
 // ── Pure helper ────────────────────────────────────────────────────────────────
 // Linear interpolation of velocity at tether time t. Returns null outside the
@@ -143,21 +144,21 @@ export default function VideoOverlayScreen({ route, navigation }) {
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container:    { flex: 1, backgroundColor: '#F5F7FA' },
+  container:    { flex: 1, backgroundColor: colors.bg },
   header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 8 },
-  title:        { fontSize: 18, fontWeight: '700', color: '#1E3A5F' },
-  backText:     { fontSize: 14, color: '#2196F3' },
+  title:        { fontSize: 18, fontWeight: '700', color: colors.text },
+  backText:     { fontSize: 14, color: colors.primary },
   video:        { width: '100%', aspectRatio: 3 / 4, backgroundColor: '#000' },
   readoutRow:   { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'center', marginTop: 8 },
-  readoutValue: { fontSize: 36, fontWeight: '700', color: '#1E3A5F' },
-  readoutUnit:  { fontSize: 14, color: '#95A5A6', marginLeft: 6 },
+  readoutValue: { fontSize: 36, fontWeight: '700', color: colors.text },
+  readoutUnit:  { fontSize: 14, color: colors.textMuted, marginLeft: 6 },
   chartWrap:    { paddingHorizontal: 24, marginTop: 4 },
   nudgeRow:     { flexDirection: 'row', justifyContent: 'center', gap: 10, marginTop: 8 },
-  nudgeBtn:     { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#F0F2F5', borderWidth: 1, borderColor: '#E0E4EA' },
-  nudgeBtnText: { fontSize: 14, fontWeight: '600', color: '#1E3A5F' },
-  nudgeLabel:   { fontSize: 12, color: '#7F8C8D', textAlign: 'center', marginTop: 6 },
-  debugLine:    { fontSize: 10, color: '#B0B8C4', textAlign: 'center', marginTop: 4 },
-  statusText:   { fontSize: 15, color: '#2C3E50', marginTop: 24, textAlign: 'center' },
-  primaryBtn:   { backgroundColor: '#1E3A5F', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12, alignSelf: 'center' },
-  btnText:      { color: '#FFF', fontSize: 16, fontWeight: '600' },
+  nudgeBtn:     { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  nudgeBtnText: { fontSize: 14, fontWeight: '600', color: colors.text },
+  nudgeLabel:   { fontSize: 12, color: colors.textSecondary, textAlign: 'center', marginTop: 6 },
+  debugLine:    { fontSize: 10, color: colors.textMuted, textAlign: 'center', marginTop: 4 },
+  statusText:   { fontSize: 15, color: colors.text, marginTop: 24, textAlign: 'center' },
+  primaryBtn:   { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12, alignSelf: 'center' },
+  btnText:      { color: colors.white, fontSize: 16, fontWeight: '600' },
 });

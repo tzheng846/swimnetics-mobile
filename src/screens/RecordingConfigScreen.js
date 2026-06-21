@@ -1,31 +1,46 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  View, Text, TouchableOpacity, TextInput,
-  SafeAreaView, StyleSheet, ScrollView, KeyboardAvoidingView, Platform,
-  ActivityIndicator, Alert,
+  View, TextInput, Pressable,
+  ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import AppText from '../components/ui/AppText';
+import Button from '../components/ui/Button';
+import { supabase } from '../lib/supabase';
 import { useBle } from '../context/BleContext';
+import { colors, spacing, radii } from '../theme';
 
 const STROKES = [
-  { key: 'breaststroke',          label: 'Breaststroke' },
-  { key: 'freestyle',             label: 'Freestyle' },
-  { key: 'backstroke',            label: 'Backstroke' },
-  { key: 'butterfly',             label: 'Butterfly' },
-  { key: 'im',                    label: 'Individual Medley' },
-  { key: 'udk',                   label: 'Underwater Dolphin Kick' },
+  { key: 'breaststroke', label: 'Breast' },
+  { key: 'freestyle', label: 'Free' },
+  { key: 'backstroke', label: 'Back' },
+  { key: 'butterfly', label: 'Fly' },
+  { key: 'im', label: 'IM' },
+  { key: 'udk', label: 'UDK' },
 ];
 
 export default function RecordingConfigScreen({ route, navigation }) {
   const { athleteId, athleteName, defaultStrokeType, headWaistM } = route.params ?? {};
   const { knownDevices, connectedDevice, connectionStatus, connectToDevice } = useBle();
 
-  const defaultStroke = STROKES.find(s => s.key === defaultStrokeType) ? defaultStrokeType : 'breaststroke';
-  const [strokeType, setStrokeType] = useState(defaultStroke);
+  const [athletes, setAthletes] = useState([]);
+  const [athlete, setAthlete] = useState(
+    athleteId ? { id: athleteId, name: athleteName, stroke_type: defaultStrokeType, head_waist_m: headWaistM } : null,
+  );
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [strokeType, setStrokeType] = useState(
+    STROKES.find(s => s.key === defaultStrokeType) ? defaultStrokeType : 'breaststroke',
+  );
   const [sessionName, setSessionName] = useState('');
   const [sessionNotes, setSessionNotes] = useState('');
   const [connectingId, setConnectingId] = useState(null);
 
   const isConnected = connectionStatus === 'connected';
+
+  useEffect(() => {
+    supabase.from('athletes').select('id, name, stroke_type, head_waist_m').order('name')
+      .then(({ data }) => setAthletes(data ?? []));
+  }, []);
 
   const handleConnect = async (bleId) => {
     if (connectingId) return;
@@ -33,93 +48,109 @@ export default function RecordingConfigScreen({ route, navigation }) {
     try {
       await connectToDevice(bleId);
     } catch (e) {
-      Alert.alert('Connection Failed', e.message ?? 'Could not connect to device.');
+      Alert.alert('Connection failed', e.message ?? 'Could not connect to device.');
     } finally {
       setConnectingId(null);
     }
   };
 
+  const pickAthlete = (a) => {
+    setAthlete(a);
+    if (STROKES.find(s => s.key === a.stroke_type)) setStrokeType(a.stroke_type);
+    setPickerOpen(false);
+  };
+
   const handleContinue = () => {
-    if (!isConnected) return;
+    if (!isConnected || !athlete) return;
     navigation.navigate('Record', {
-      athleteId,
-      athleteName,
-      headWaistM,
+      athleteId: athlete.id,
+      athleteName: athlete.name,
+      headWaistM: athlete.head_waist_m ?? 0,
       strokeType,
-      sessionName:  sessionName.trim()  || null,
+      sessionName: sessionName.trim() || null,
       sessionNotes: sessionNotes.trim() || null,
     });
   };
 
   return (
-    <SafeAreaView style={s.container}>
+    <SafeAreaView edges={['top']} style={{ flex: 1, backgroundColor: colors.bg }}>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
-        <View style={s.header}>
-          <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Text style={s.back}>‹ Athletes</Text>
-          </TouchableOpacity>
-          <Text style={s.title}>{athleteName}</Text>
-          <View style={{ width: 60 }} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: spacing.lg, marginTop: spacing.md, marginBottom: spacing.xs }}>
+          <Pressable onPress={() => navigation.goBack()} accessibilityLabel="Back" hitSlop={10}>
+            <AppText variant="title" color="text">‹</AppText>
+          </Pressable>
+          <AppText variant="title">New session</AppText>
         </View>
 
-        <ScrollView contentContainerStyle={s.body} keyboardShouldPersistTaps="handled">
+        <ScrollView contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingBottom: 40, paddingTop: spacing.sm }} keyboardShouldPersistTaps="handled">
+          {/* Athlete picker */}
+          <AppText variant="label" color="textSecondary" style={st.label}>Athlete</AppText>
+          <Pressable style={st.select} onPress={() => setPickerOpen(o => !o)}>
+            <AppText variant="body" color={athlete ? 'text' : 'textMuted'}>{athlete?.name || 'Choose an athlete'}</AppText>
+            <AppText color="periwinkle">{pickerOpen ? '▴' : '▾'}</AppText>
+          </Pressable>
+          {pickerOpen && (
+            <View style={st.pickerList}>
+              {athletes.length === 0 ? (
+                <AppText variant="caption" color="textMuted" style={{ padding: spacing.md }}>No athletes yet.</AppText>
+              ) : athletes.map(a => (
+                <Pressable key={a.id} style={st.pickerRow} onPress={() => pickAthlete(a)}>
+                  <AppText variant="body" color={athlete?.id === a.id ? 'primary' : 'text'}>{a.name}</AppText>
+                  {athlete?.id === a.id ? <AppText color="primary">✓</AppText> : null}
+                </Pressable>
+              ))}
+            </View>
+          )}
 
           {/* Device picker */}
-          <Text style={s.label}>DEVICE</Text>
+          <AppText variant="label" color="textSecondary" style={st.label}>Device</AppText>
           {knownDevices.length === 0 ? (
             <View>
-              <Text style={s.emptyDevices}>No paired devices.</Text>
-              <TouchableOpacity onPress={() => navigation.navigate('Devices')}>
-                <Text style={s.pairLink}>Pair a device →</Text>
-              </TouchableOpacity>
+              <AppText variant="caption" color="textMuted" style={{ marginBottom: 6 }}>No paired devices.</AppText>
+              <Pressable onPress={() => navigation.navigate('Devices')}><AppText color="primary">Pair a device →</AppText></Pressable>
             </View>
           ) : (
             knownDevices.map(d => {
               const rowConnected = connectedDevice?.id === d.bleId && isConnected;
               return (
-                <TouchableOpacity
+                <Pressable
                   key={d.bleId}
-                  style={s.deviceRow}
+                  style={st.deviceRow}
                   onPress={() => !rowConnected && handleConnect(d.bleId)}
                   disabled={rowConnected || connectingId === d.bleId}
                 >
-                  {rowConnected && <View style={s.connectedDot} />}
+                  {rowConnected && <View style={st.connectedDot} />}
                   <View style={{ flex: 1 }}>
-                    <Text style={s.deviceRowName}>{d.name}</Text>
-                    {d.chipId ? <Text style={s.deviceRowChip}>{d.chipId}</Text> : null}
+                    <AppText variant="body" color="text">{d.name}</AppText>
+                    {d.chipId ? <AppText variant="caption" color="textMuted">{d.chipId}</AppText> : null}
                   </View>
                   {connectingId === d.bleId
-                    ? <ActivityIndicator color="#2196F3" size="small" />
-                    : <Text style={rowConnected ? s.deviceConnectedText : s.deviceTapText}>
-                        {rowConnected ? 'Connected' : 'Tap to connect'}
-                      </Text>}
-                </TouchableOpacity>
+                    ? <ActivityIndicator color={colors.primary} size="small" />
+                    : <AppText variant="caption" color={rowConnected ? 'good' : 'primary'} weight="600">{rowConnected ? 'Connected' : 'Tap to connect'}</AppText>}
+                </Pressable>
               );
             })
           )}
 
           {/* Stroke picker */}
-          <Text style={s.label}>STROKE</Text>
-          <View style={s.strokeGrid}>
-            {STROKES.map(stroke => (
-              <TouchableOpacity
-                key={stroke.key}
-                style={[s.strokeBtn, strokeType === stroke.key && s.strokeBtnActive]}
-                onPress={() => setStrokeType(stroke.key)}
-              >
-                <Text style={[s.strokeBtnText, strokeType === stroke.key && s.strokeBtnTextActive]}>
-                  {stroke.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+          <AppText variant="label" color="textSecondary" style={st.label}>Stroke</AppText>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {STROKES.map(stroke => {
+              const on = strokeType === stroke.key;
+              return (
+                <Pressable key={stroke.key} style={[st.strokeBtn, on && st.strokeBtnOn]} onPress={() => setStrokeType(stroke.key)}>
+                  <AppText variant="label" color={on ? colors.white : 'textSecondary'}>{stroke.label}</AppText>
+                </Pressable>
+              );
+            })}
           </View>
 
           {/* Session name */}
-          <Text style={s.label}>SESSION NAME <Text style={s.optional}>(optional)</Text></Text>
+          <AppText variant="label" color="textSecondary" style={st.label}>Session name <AppText variant="label" color="textMuted">(optional)</AppText></AppText>
           <TextInput
-            style={s.input}
+            style={st.input}
             placeholder="e.g. Sprint set, Race simulation…"
-            placeholderTextColor="#555"
+            placeholderTextColor={colors.textMuted}
             value={sessionName}
             onChangeText={setSessionName}
             autoCapitalize="sentences"
@@ -127,11 +158,11 @@ export default function RecordingConfigScreen({ route, navigation }) {
           />
 
           {/* Notes */}
-          <Text style={s.label}>NOTES <Text style={s.optional}>(optional)</Text></Text>
+          <AppText variant="label" color="textSecondary" style={st.label}>Notes <AppText variant="label" color="textMuted">(optional)</AppText></AppText>
           <TextInput
-            style={[s.input, s.inputMulti]}
+            style={[st.input, { height: 88, paddingTop: 12 }]}
             placeholder="e.g. Felt strong on turns, tired at 40m…"
-            placeholderTextColor="#555"
+            placeholderTextColor={colors.textMuted}
             value={sessionNotes}
             onChangeText={setSessionNotes}
             multiline
@@ -140,48 +171,26 @@ export default function RecordingConfigScreen({ route, navigation }) {
             autoCapitalize="sentences"
           />
 
-          <TouchableOpacity
-            style={[s.continueBtn, !isConnected && s.continueBtnDisabled]}
+          <Button
+            title={!athlete ? 'Choose an athlete' : isConnected ? 'Start recording' : 'Connect a device to continue'}
             onPress={handleContinue}
-            disabled={!isConnected}
-          >
-            <Text style={s.continueBtnText}>
-              {isConnected ? 'Continue →' : 'Connect a device to continue'}
-            </Text>
-          </TouchableOpacity>
-
+            disabled={!isConnected || !athlete}
+            style={{ marginTop: spacing.xxl }}
+          />
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
 
-const s = StyleSheet.create({
-  container:           { flex: 1, backgroundColor: '#000' },
-  header:              { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 4 },
-  back:                { color: '#2196F3', fontSize: 14 },
-  title:               { color: '#fff', fontSize: 18, fontWeight: '700' },
-  body:                { paddingHorizontal: 20, paddingBottom: 40, paddingTop: 16 },
-  label:               { color: '#888', fontSize: 11, fontWeight: '600', letterSpacing: 1, marginBottom: 10, marginTop: 20 },
-  optional:            { color: '#555', fontWeight: '400' },
-  strokeGrid:          { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  strokeBtn:           { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 8, backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
-  strokeBtnActive:     { backgroundColor: '#2196F3', borderColor: '#2196F3' },
-  strokeBtnText:       { color: '#888', fontSize: 14, fontWeight: '500' },
-  strokeBtnTextActive: { color: '#fff', fontWeight: '600' },
-  input:               { backgroundColor: '#1a1a1a', color: '#fff', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 12, fontSize: 15, borderWidth: 1, borderColor: '#333' },
-  inputMulti:          { height: 88, paddingTop: 12 },
-  continueBtn:         { backgroundColor: '#2196F3', borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginTop: 32 },
-  continueBtnDisabled: { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
-  continueBtnText:     { color: '#fff', fontSize: 16, fontWeight: '700' },
-
-  // Device picker
-  emptyDevices:        { color: '#555', fontSize: 13, marginBottom: 6 },
-  pairLink:            { color: '#2196F3', fontSize: 14, fontWeight: '600', marginBottom: 4 },
-  deviceRow:           { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 14, backgroundColor: '#1a1a1a', borderRadius: 8, borderWidth: 1, borderColor: '#333', marginBottom: 8 },
-  connectedDot:        { width: 8, height: 8, borderRadius: 4, backgroundColor: '#27AE60', marginRight: 10 },
-  deviceRowName:       { color: '#fff', fontSize: 15, fontWeight: '500' },
-  deviceRowChip:       { color: '#555', fontSize: 11, marginTop: 2 },
-  deviceConnectedText: { color: '#27AE60', fontSize: 12, fontWeight: '600' },
-  deviceTapText:       { color: '#2196F3', fontSize: 12, fontWeight: '600' },
-});
+const st = {
+  label: { marginTop: spacing.xl, marginBottom: spacing.sm },
+  select: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, paddingHorizontal: 14, paddingVertical: 13 },
+  pickerList: { marginTop: 6, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radii.md, overflow: 'hidden' },
+  pickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 14, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: colors.surfaceAlt },
+  deviceRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 14, backgroundColor: colors.surface, borderRadius: radii.md, borderWidth: 1, borderColor: colors.border, marginBottom: 8 },
+  connectedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.good, marginRight: 10 },
+  strokeBtn: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: radii.md, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  strokeBtnOn: { backgroundColor: colors.primary, borderColor: colors.primary },
+  input: { backgroundColor: colors.surfaceAlt, color: colors.text, borderRadius: radii.md, paddingHorizontal: 16, paddingVertical: 12, fontSize: 15, borderWidth: 1, borderColor: colors.border },
+};

@@ -1,6 +1,13 @@
 import React from 'react';
 import { Dimensions, Text, View, PanResponder, TouchableOpacity, StyleSheet } from 'react-native';
 import Svg, { Polyline, Line, Text as SvgText, Rect } from 'react-native-svg';
+import { colors } from '../theme';
+
+// Theme-aware colors: `dark` for the immersive active-recording screen, light for ReportCard.
+const CHART_COLORS = {
+  light: { grid: colors.border, line: colors.primary, marker: colors.periwinkle, cursor: colors.primary, tooltipBg: colors.text, tooltipText: colors.white, axis: colors.textMuted, cycle: colors.periwinkle },
+  dark:  { grid: 'rgba(255,255,255,0.18)', line: colors.accent, marker: colors.accent, cursor: colors.accent, tooltipBg: colors.surface, tooltipText: colors.text, axis: 'rgba(255,255,255,0.6)', cycle: 'rgba(255,255,255,0.35)' },
+};
 
 export default function VelocityChart({
   time,
@@ -10,9 +17,12 @@ export default function VelocityChart({
   unitFactor = 1,
   unitLabel = 'm/s',
   interactive = false,
+  dark = false,
+  cycleBoundaries = [],
   onInteractionStart = null,
   onInteractionEnd = null,
 }) {
+  const C = dark ? CHART_COLORS.dark : CHART_COLORS.light;
   const W = Dimensions.get('window').width - 48;
   const H = 150;
   const PAD = 4;
@@ -70,7 +80,7 @@ export default function VelocityChart({
   onInteractionEndRef.current   = onInteractionEnd;
 
   if (!time || time.length < 2) {
-    return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
+    return <Text style={{ color: C.axis, marginTop: 8 }}>No data</Text>;
   }
 
   // Downsample to max 400 points; filter null/NaN
@@ -79,7 +89,7 @@ export default function VelocityChart({
   for (let i = 0; i < time.length; i += step) {
     if (velocity[i] != null && !isNaN(velocity[i])) allIndices.push(i);
   }
-  if (allIndices.length < 2) return <Text style={{ color: '#999', marginTop: 8 }}>No data</Text>;
+  if (allIndices.length < 2) return <Text style={{ color: C.axis, marginTop: 8 }}>No data</Text>;
 
   const fullT = allIndices.map(i => time[i]);
   const fullV = allIndices.map(i => velocity[i]);
@@ -173,29 +183,44 @@ export default function VelocityChart({
 
   const svgContent = (
     <Svg width={W} height={H + 20}>
-      <Line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#E8E8E8" strokeWidth={1} />
-      <Polyline points={points} fill="none" stroke="#1E3A5F" strokeWidth={1.5} />
+      <Line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke={C.grid} strokeWidth={1} />
+      {cycleBoundaries.map((bt, i) =>
+        bt < tMin || bt > tMax ? null : (
+          <Line
+            key={`cyc-${i}`}
+            x1={px(bt)}
+            y1={PAD}
+            x2={px(bt)}
+            y2={H}
+            stroke={C.cycle}
+            strokeWidth={1}
+            strokeDasharray="3,3"
+            opacity={0.55}
+          />
+        ),
+      )}
+      <Polyline points={points} fill="none" stroke={C.line} strokeWidth={1.5} />
       {showMarker && (
         <>
-          <Line x1={markerX} y1={0} x2={markerX} y2={H} stroke="#E67E22" strokeWidth={1.5} />
-          <SvgText x={markerX + 3} y={10} fontSize={9} fill="#E67E22">{markerLabel}</SvgText>
+          <Line x1={markerX} y1={0} x2={markerX} y2={H} stroke={C.marker} strokeWidth={1.5} />
+          <SvgText x={markerX + 3} y={10} fontSize={9} fill={C.marker}>{markerLabel}</SvgText>
         </>
       )}
       {cursor && (
         <>
-          <Line x1={cursorX} y1={0} x2={cursorX} y2={H} stroke="#2196F3" strokeWidth={1} opacity={0.7} />
-          <Rect x={tooltipX} y={H / 2 - 18} width={72} height={30} rx={4} fill="#1E3A5F" opacity={0.85} />
-          <SvgText x={tooltipX + 4} y={H / 2 - 4} fontSize={10} fill="#FFF">
+          <Line x1={cursorX} y1={0} x2={cursorX} y2={H} stroke={C.cursor} strokeWidth={1} opacity={0.7} />
+          <Rect x={tooltipX} y={H / 2 - 18} width={72} height={30} rx={4} fill={C.tooltipBg} opacity={0.92} />
+          <SvgText x={tooltipX + 4} y={H / 2 - 4} fontSize={10} fill={C.tooltipText}>
             {(cursor.vel * unitFactor).toFixed(2)} {unitLabel}
           </SvgText>
-          <SvgText x={tooltipX + 4} y={H / 2 + 10} fontSize={10} fill="#AAA">
+          <SvgText x={tooltipX + 4} y={H / 2 + 10} fontSize={10} fill={C.axis}>
             {cursor.timeS.toFixed(1)}s
           </SvgText>
         </>
       )}
-      <SvgText x={PAD} y={H + 14} fontSize={10} fill="#AAA">{tMin.toFixed(0)}s</SvgText>
-      <SvgText x={W - 24} y={H + 14} fontSize={10} fill="#AAA">{tMax.toFixed(0)}s</SvgText>
-      <SvgText x={PAD} y={12} fontSize={10} fill="#AAA">{(vMax * unitFactor).toFixed(1)} {unitLabel}</SvgText>
+      <SvgText x={PAD} y={H + 14} fontSize={10} fill={C.axis}>{tMin.toFixed(0)}s</SvgText>
+      <SvgText x={W - 24} y={H + 14} fontSize={10} fill={C.axis}>{tMax.toFixed(0)}s</SvgText>
+      <SvgText x={PAD} y={12} fontSize={10} fill={C.axis}>{(vMax * unitFactor).toFixed(1)} {unitLabel}</SvgText>
     </Svg>
   );
 
@@ -216,6 +241,6 @@ export default function VelocityChart({
 }
 
 const vcStyles = StyleSheet.create({
-  resetZoom: { alignSelf: 'center', marginTop: 4, paddingHorizontal: 10, paddingVertical: 3, backgroundColor: '#F0F2F5', borderRadius: 10 },
-  resetZoomText: { fontSize: 11, color: '#7F8C8D' },
+  resetZoom: { alignSelf: 'center', marginTop: 4, paddingHorizontal: 10, paddingVertical: 3, backgroundColor: colors.surfaceAlt, borderRadius: 10 },
+  resetZoomText: { fontSize: 11, color: colors.textSecondary },
 });

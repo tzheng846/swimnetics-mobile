@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import {
-  View, Text, TextInput, TouchableOpacity,
-  ActivityIndicator, SafeAreaView, StyleSheet, KeyboardAvoidingView, Platform,
-} from 'react-native';
-import Svg, { Path } from 'react-native-svg';
+import { View, TextInput } from 'react-native';
+import Screen from '../components/ui/Screen';
+import AppText from '../components/ui/AppText';
+import Button from '../components/ui/Button';
 import { supabase } from '../lib/supabase';
+import { colors, radii, spacing } from '../theme';
 
 export default function LoginScreen() {
   const [email, setEmail]       = useState('');
@@ -21,90 +21,55 @@ export default function LoginScreen() {
     });
     setLoading(false);
     if (error) setError(error.message);
-    // On success: AuthContext.onAuthStateChange fires → App.js shows RecordScreen
+    // On success: AuthContext.onAuthStateChange fires → App.js shows RootTabs
   };
 
   return (
-    <SafeAreaView style={s.container}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={s.inner}
-      >
-        <Svg width={180} height={48} style={{ marginBottom: 16 }}>
-          <Path
-            d="M 10 30 C 28 10, 45 10, 63 30 C 81 50, 98 50, 116 30 C 134 10, 151 10, 170 30"
-            stroke="#5B8DEF"
-            strokeWidth={3}
-            fill="none"
-            strokeLinecap="round"
-          />
-        </Svg>
-        <Text style={s.title}>SWIMNETICS</Text>
-        <Text style={s.tagline}>VELOCITY INTELLIGENCE</Text>
+    <Screen keyboardAvoiding contentStyle={{ flex: 1, justifyContent: 'center' }}>
+      <View style={{ alignItems: 'center', marginBottom: spacing.xxxl }}>
+        <AppText variant="label" color="periwinkle" style={{ letterSpacing: 3 }}>velocity intelligence</AppText>
+        <AppText variant="display" style={{ marginTop: 6 }}>swimnetics</AppText>
+      </View>
 
-        <TextInput
-          style={s.input}
-          placeholder="Email"
-          placeholderTextColor="#666"
-          value={email}
-          onChangeText={setEmail}
-          keyboardType="email-address"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <TextInput
-          style={s.input}
-          placeholder="Password"
-          placeholderTextColor="#666"
-          value={password}
-          onChangeText={setPassword}
-          secureTextEntry
-          autoCapitalize="none"
-        />
+      <AppText variant="label" color="textSecondary" style={{ marginBottom: 6 }}>Email</AppText>
+      <TextInput
+        style={inputStyle}
+        placeholder="coach@team.com"
+        placeholderTextColor={colors.textMuted}
+        value={email}
+        onChangeText={setEmail}
+        keyboardType="email-address"
+        autoCapitalize="none"
+        autoCorrect={false}
+      />
 
-        <TouchableOpacity
-          style={[s.button, loading && s.buttonDisabled]}
-          onPress={handleSignIn}
-          disabled={loading}
-        >
-          {loading
-            ? <ActivityIndicator color="#fff" />
-            : <Text style={s.buttonText}>Sign In</Text>
-          }
-        </TouchableOpacity>
+      <AppText variant="label" color="textSecondary" style={{ marginTop: spacing.lg, marginBottom: 6 }}>Password</AppText>
+      <TextInput
+        style={inputStyle}
+        placeholder="••••••••"
+        placeholderTextColor={colors.textMuted}
+        value={password}
+        onChangeText={setPassword}
+        secureTextEntry
+        autoCapitalize="none"
+      />
 
-        {error ? <Text style={s.error}>{error}</Text> : null}
-      </KeyboardAvoidingView>
-    </SafeAreaView>
+      <Button title="Sign in" onPress={handleSignIn} loading={loading} style={{ marginTop: spacing.xxl }} />
+
+      {error ? (
+        <AppText color="needsWork" style={{ marginTop: spacing.lg, textAlign: 'center' }}>{error}</AppText>
+      ) : null}
+    </Screen>
   );
 }
 
-const s = StyleSheet.create({
-  container:      { flex: 1, backgroundColor: '#000' },
-  inner:          { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32 },
-  title:          { color: '#fff', fontSize: 26, fontWeight: '700', textAlign: 'center', letterSpacing: 6, marginBottom: 6 },
-  tagline:        { color: '#F59E0B', fontSize: 11, letterSpacing: 3, textAlign: 'center', marginBottom: 40 },
-  input:          {
-    backgroundColor: '#1a1a1a',
-    color: '#fff',
-    borderRadius: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    width: '100%',
-  },
-  button:         {
-    backgroundColor: '#2196F3',
-    borderRadius: 8,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 8,
-    width: '100%',
-  },
-  buttonDisabled: { opacity: 0.6 },
-  buttonText:     { color: '#fff', fontSize: 16, fontWeight: '600' },
-  error:          { color: '#FF5252', marginTop: 16, textAlign: 'center', fontSize: 14 },
-});
+const inputStyle = {
+  backgroundColor: colors.surfaceAlt,
+  color: colors.text,
+  borderRadius: radii.md,
+  paddingHorizontal: 14,
+  paddingVertical: 12,
+  fontSize: 15,
+  borderWidth: 1,
+  borderColor: colors.border,
+};

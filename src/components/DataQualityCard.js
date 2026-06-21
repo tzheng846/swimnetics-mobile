@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { colors } from '../theme';
 
 /**
  * DataQualityCard — shows cycle quality stats and warnings from the
@@ -68,15 +69,15 @@ function Stat({ label, value, warn }) {
 }
 
 const s = StyleSheet.create({
-  card:       { backgroundColor: '#FFF', borderRadius: 12, padding: 14, marginBottom: 10 },
-  cardWarn:   { borderLeftWidth: 3, borderLeftColor: '#F39C12' },
-  title:      { fontSize: 11, color: '#7F8C8D', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  card:       { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 14, marginBottom: 10 },
+  cardWarn:   { borderLeftWidth: 3, borderLeftColor: colors.ok },
+  title:      { fontSize: 11, color: colors.textSecondary, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
   statsRow:   { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
   stat:       { alignItems: 'center', flex: 1 },
-  statLabel:  { fontSize: 11, color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 0.5 },
-  statValue:  { fontSize: 18, fontWeight: '700', color: '#1E3A5F', marginTop: 2 },
-  statWarn:   { color: '#E67E22' },
-  warnRow:    { backgroundColor: '#FFF9E6', borderRadius: 6, padding: 8, marginBottom: 4 },
-  warnText:   { fontSize: 12, color: '#E67E22', lineHeight: 17 },
-  kickNote:   { fontSize: 11, color: '#B0B8C4', marginTop: 4, lineHeight: 16 },
+  statLabel:  { fontSize: 11, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  statValue:  { fontSize: 18, fontWeight: '700', color: colors.text, marginTop: 2 },
+  statWarn:   { color: colors.ok },
+  warnRow:    { backgroundColor: colors.okBg, borderRadius: 6, padding: 8, marginBottom: 4 },
+  warnText:   { fontSize: 12, color: colors.ok, lineHeight: 17 },
+  kickNote:   { fontSize: 11, color: colors.textMuted, marginTop: 4, lineHeight: 16 },
 });

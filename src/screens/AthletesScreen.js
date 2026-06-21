@@ -1,268 +1,188 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import {
-  View, Text, TouchableOpacity, FlatList,
-  ActivityIndicator, SafeAreaView, StyleSheet,
-  TextInput, KeyboardAvoidingView, Platform, Alert,
-} from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { View, Pressable, ActivityIndicator, TextInput, Alert } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import Screen from '../components/ui/Screen';
+import AppText from '../components/ui/AppText';
+import Card from '../components/ui/Card';
+import Button from '../components/ui/Button';
+import { GaugeIcon, RulerIcon, WaveIcon, BatteryIcon } from '../components/ui/PillarIcons';
+import { apiFetch } from '../lib/apiFetch';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import { API_BASE } from '../config';
+import { colors, spacing, radii } from '../theme';
 
-const AVATAR_COLORS = ['#2563EB', '#7C3AED', '#0891B2', '#059669', '#D97706', '#DC2626'];
-function avatarColor(name) {
-  const code = (name?.charCodeAt(0) ?? 65) - 65;
-  return AVATAR_COLORS[Math.abs(code) % AVATAR_COLORS.length];
+const PILLAR_ORDER = ['speed', 'stroke_length', 'consistency', 'endurance'];
+const HEADER_ICONS = { speed: GaugeIcon, stroke_length: RulerIcon, consistency: WaveIcon, endurance: BatteryIcon };
+// Bands are snake_case (good/ok/needs_work); token keys are camelCase — map explicitly.
+const BAND_FALLBACK = { good: colors.good, ok: colors.ok, needs_work: colors.needsWork };
+
+function relTested(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days < 14) return `${days} days ago`;
+  return d.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
 }
 
 export default function AthletesScreen({ navigation }) {
-  const { teamId, signOut, session } = useAuth();
-  const [athletes, setAthletes] = useState([]);
+  const { session, teamId } = useAuth();
+  const [data, setData] = useState(null);
+  const [limit, setLimit] = useState(20);   // swimmer cap; default 20 if the team has none set
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
   const [newHW, setNewHW] = useState('');
   const [saving, setSaving] = useState(false);
-  const [editingId, setEditingId] = useState(null);
-  const [editHW, setEditHW] = useState('');
-  const [lastSessions, setLastSessions] = useState({});
 
-  const fetchAthletes = useCallback(async () => {
-    const { data } = await supabase
-      .from('athletes')
-      .select('id, name, stroke_type, head_waist_m')
-      .order('name');
-    setAthletes(data ?? []);
-
-    const ids = (data ?? []).map(a => a.id);
-    if (ids.length > 0) {
-      const { data: sessions } = await supabase
-        .from('sessions')
-        .select('athlete_id, created_at, metrics_json')
-        .in('athlete_id', ids)
-        .order('created_at', { ascending: false });
-      const latest = {};
-      for (const s of sessions ?? []) {
-        if (!latest[s.athlete_id]) latest[s.athlete_id] = s;
+  const load = useCallback(async () => {
+    try {
+      setError(null);
+      const ov = await apiFetch('/team/overview', { token: session?.access_token });
+      setData(ov);
+      if (teamId) {
+        const { data: t } = await supabase.from('teams').select('swimmer_limit').eq('id', teamId).single();
+        if (t?.swimmer_limit != null) setLimit(t.swimmer_limit);
       }
-      setLastSessions(latest);
+    } catch (e) {
+      setError(e.message || 'Could not load roster.');
+    } finally {
+      setLoading(false);
     }
+  }, [session, teamId]);
 
-    setLoading(false);
-  }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
-  useEffect(() => { fetchAthletes(); }, [fetchAthletes]);
+  const rc = data?.rating_colors || {};
+  const athletes = data?.athletes || [];
 
   const handleAdd = async () => {
     if (!newName.trim()) return;
     setSaving(true);
     const hw = newHW.trim() !== '' ? parseFloat(newHW) : null;
     try {
-      const resp = await fetch(`${API_BASE}/athletes`, {
+      await apiFetch('/athletes', {
+        token: session?.access_token,
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${session?.access_token}`,
-        },
-        body: JSON.stringify({ name: newName.trim(), stroke_type: 'breaststroke', head_waist_m: hw }),
+        body: { name: newName.trim(), stroke_type: 'breaststroke', head_waist_m: hw },
       });
-      if (resp.status === 402) {
-        const body = await resp.json().catch(() => ({}));
-        Alert.alert(
-          'Athlete Limit Reached',
-          (body.detail || 'You have reached your athlete limit.') + '\n\nVisit swimnetics.com to upgrade.',
-          [{ text: 'OK' }],
-        );
-        return;
-      }
-      if (!resp.ok) {
-        const body = await resp.json().catch(() => ({}));
-        Alert.alert('Error', body.detail || 'Failed to add athlete.');
-        return;
-      }
-      const inserted = await resp.json();
-      setAthletes(prev =>
-        [...prev, inserted].sort((a, b) => a.name.localeCompare(b.name))
-      );
-      setNewName('');
-      setNewHW('');
-      setAdding(false);
+      setNewName(''); setNewHW(''); setAdding(false);
+      load();
     } catch (e) {
-      Alert.alert('Error', e.message || 'Failed to add athlete.');
+      if (e.status === 402) {
+        Alert.alert('Athlete limit reached', (e.message || 'You have reached your athlete limit.') + '\n\nVisit swimnetics.com to upgrade.');
+      } else {
+        Alert.alert('Error', e.message || 'Failed to add athlete.');
+      }
     } finally {
       setSaving(false);
     }
   };
 
-  const handleEditHW = async (id) => {
-    const hw = editHW.trim() !== '' ? parseFloat(editHW) : null;
-    const { error } = await supabase
-      .from('athletes')
-      .update({ head_waist_m: hw })
-      .eq('id', id);
-    if (!error) {
-      setAthletes(prev => prev.map(a => a.id === id ? { ...a, head_waist_m: hw } : a));
-    }
-    setEditingId(null);
-    setEditHW('');
-  };
+  const bandColor = (band) => rc[band] || BAND_FALLBACK[band] || colors.textMuted;
 
-  const renderAthlete = ({ item }) => {
-    const ls = lastSessions[item.id];
-    const lsText = ls
-      ? `${new Date(ls.created_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })} · ${ls.metrics_json?.session?.stroke_rate_spm?.toFixed(1)} SPM`
-      : 'No sessions yet';
+  const renderRow = (a, i) => {
+    const byKey = Object.fromEntries((a.pillars || []).map(p => [p.key, p]));
+    const tested = relTested(a.last_tested);
+    const hasPillars = (a.pillars || []).length > 0;
     return (
-      <View style={s.card}>
-        <TouchableOpacity
-          style={s.cardMain}
-          onPress={() => navigation.navigate('RecordingConfig', {
-            athleteId: item.id,
-            athleteName: item.name,
-            defaultStrokeType: item.stroke_type,
-            headWaistM: item.head_waist_m ?? 0,
-          })}
-        >
-          <View style={[s.avatar, { backgroundColor: avatarColor(item.name) }]}>
-            <Text style={s.avatarText}>{item.name?.[0]?.toUpperCase() ?? '?'}</Text>
-          </View>
-          <View style={s.cardBody}>
-            <Text style={s.cardName}>{item.name}</Text>
-            <Text style={s.cardStroke}>{item.stroke_type}</Text>
-            <Text style={s.cardLastSession}>{lsText}</Text>
-          </View>
-          <Text style={s.cardArrow}>›</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={s.historyBtn}
-          onPress={() => navigation.navigate('SessionHistory', {
-            athleteId: item.id,
-            athleteName: item.name,
-            headWaistM: item.head_waist_m ?? 0,
-          })}
-        >
-          <Text style={s.historyBtnText}>History ›</Text>
-        </TouchableOpacity>
-      </View>
+      <Pressable
+        key={a.athlete_id}
+        onPress={() => navigation.navigate('AthleteDetail', { athlete: a })}
+        style={{
+          flexDirection: 'row', alignItems: 'center', paddingVertical: 11,
+          borderTopWidth: 1, borderTopColor: i === 0 ? colors.border : colors.surfaceAlt,
+        }}
+      >
+        <View style={{ flex: 1.5 }}>
+          <AppText variant="body" color="text" numberOfLines={1}>{a.name}</AppText>
+          <AppText variant="caption" color={tested ? 'textMuted' : 'needsWork'}>{tested || 'never tested'}</AppText>
+        </View>
+        {PILLAR_ORDER.map((key) => {
+          const p = byKey[key];
+          return (
+            <View key={key} style={{ flex: 1, alignItems: 'center' }}>
+              {hasPillars && p ? (
+                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: bandColor(p.band) }} />
+              ) : (
+                <AppText variant="caption" color="textMuted">—</AppText>
+              )}
+            </View>
+          );
+        })}
+      </Pressable>
     );
   };
 
   return (
-    <SafeAreaView style={s.container}>
-    <KeyboardAvoidingView
-      style={{ flex: 1 }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <View style={s.header}>
-        <Text style={s.title}>Swimnetics</Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-          <TouchableOpacity onPress={() => navigation.navigate('Devices')} style={s.gearBtn}>
-            <Text style={s.gearText}>⚙</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={signOut}>
-            <Text style={s.signOut}>Sign Out</Text>
-          </TouchableOpacity>
+    <Screen scroll>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing.md, marginBottom: spacing.xs }}>
+        <View>
+          <AppText variant="title">Team</AppText>
+          {data ? <AppText variant="caption" color="textSecondary">{data.athlete_count} / {limit} swimmers</AppText> : null}
         </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Add athlete"
+          onPress={() => setAdding(v => !v)}
+          style={{ width: 36, height: 36, borderRadius: 18, backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }}
+        >
+          <AppText color={colors.white} style={{ fontSize: 22, lineHeight: 24 }}>{adding ? '×' : '+'}</AppText>
+        </Pressable>
       </View>
 
-      <Text style={s.sectionLabel}>ATHLETES</Text>
+      {adding ? (
+        <Card style={{ marginTop: spacing.sm }}>
+          <TextInput
+            value={newName} onChangeText={setNewName} placeholder="Athlete name" placeholderTextColor={colors.textMuted}
+            autoFocus autoCapitalize="words"
+            style={{ backgroundColor: colors.surfaceAlt, color: colors.text, borderRadius: radii.md, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, borderWidth: 1, borderColor: colors.border }}
+          />
+          <TextInput
+            value={newHW} onChangeText={setNewHW} placeholder="Head-waist distance (m), optional" placeholderTextColor={colors.textMuted}
+            keyboardType="decimal-pad"
+            style={{ marginTop: spacing.sm, backgroundColor: colors.surfaceAlt, color: colors.text, borderRadius: radii.md, paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, borderWidth: 1, borderColor: colors.border }}
+          />
+          <Button title="Add athlete" onPress={handleAdd} loading={saving} style={{ marginTop: spacing.md }} />
+        </Card>
+      ) : null}
 
       {loading ? (
-        <ActivityIndicator color="#2196F3" style={{ marginTop: 40 }} />
+        <ActivityIndicator color={colors.primary} style={{ marginTop: spacing.xxxl }} />
+      ) : error ? (
+        <Card style={{ marginTop: spacing.xl }}>
+          <AppText color="needsWork">{error}</AppText>
+          <Pressable onPress={load} style={{ marginTop: spacing.sm }}><AppText color="primary">Tap to retry</AppText></Pressable>
+        </Card>
       ) : (
-        <FlatList
-          data={athletes}
-          keyExtractor={a => a.id}
-          renderItem={renderAthlete}
-          contentContainerStyle={{ paddingHorizontal: 20 }}
-          ListEmptyComponent={
-            <Text style={s.empty}>No athletes yet. Add one below.</Text>
-          }
-        />
-      )}
+        <View style={{ marginTop: spacing.lg }}>
+          {/* Icon header = the pillar legend */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', paddingBottom: spacing.xs }}>
+            <View style={{ flex: 1.5 }} />
+            {PILLAR_ORDER.map((key) => {
+              const Icon = HEADER_ICONS[key];
+              return <View key={key} style={{ flex: 1, alignItems: 'center' }}><Icon color={colors.textSecondary} size={17} /></View>;
+            })}
+          </View>
 
-      {adding ? (
-        <View style={s.addForm}>
-          <TextInput
-            style={s.input}
-            placeholder="Athlete name"
-            placeholderTextColor="#666"
-            value={newName}
-            onChangeText={setNewName}
-            autoFocus
-            autoCapitalize="words"
-          />
-          <TextInput
-            style={s.input}
-            placeholder="Head-waist distance (m), e.g. 0.35"
-            placeholderTextColor="#666"
-            value={newHW}
-            onChangeText={setNewHW}
-            keyboardType="decimal-pad"
-          />
-          <View style={s.addButtons}>
-            <TouchableOpacity
-              style={[s.btn, s.btnPrimary, saving && s.btnDisabled]}
-              onPress={handleAdd}
-              disabled={saving}
-            >
-              {saving
-                ? <ActivityIndicator color="#fff" />
-                : <Text style={s.btnText}>Save</Text>
-              }
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[s.btn, s.btnSecondary]}
-              onPress={() => { setAdding(false); setNewName(''); setNewHW(''); }}
-            >
-              <Text style={[s.btnText, { color: '#888' }]}>Cancel</Text>
-            </TouchableOpacity>
+          {athletes.length === 0 ? (
+            <AppText variant="body" color="textSecondary" style={{ marginTop: spacing.lg }}>No athletes yet. Tap + to add one.</AppText>
+          ) : (
+            athletes.map(renderRow)
+          )}
+
+          <View style={{ flexDirection: 'row', gap: spacing.lg, marginTop: spacing.lg }}>
+            {[['good', 'good'], ['ok', 'ok'], ['needs_work', 'needs work']].map(([band, label]) => (
+              <View key={band} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: bandColor(band) }} />
+                <AppText variant="caption" color="textSecondary">{label}</AppText>
+              </View>
+            ))}
           </View>
         </View>
-      ) : (
-        <TouchableOpacity style={s.addBtn} onPress={() => setAdding(true)}>
-          <Text style={s.addBtnText}>+ Add Athlete</Text>
-        </TouchableOpacity>
       )}
-    </KeyboardAvoidingView>
-    </SafeAreaView>
+    </Screen>
   );
 }
-
-const s = StyleSheet.create({
-  container:     { flex: 1, backgroundColor: '#000' },
-  header:        { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 4 },
-  title:         { color: '#fff', fontSize: 22, fontWeight: '700' },
-  signOut:       { color: '#888', fontSize: 13 },
-  gearBtn:       { paddingHorizontal: 4 },
-  gearText:      { color: '#888', fontSize: 18 },
-  sectionLabel:  { color: '#888', fontSize: 12, fontWeight: '600', letterSpacing: 1, marginHorizontal: 20, marginBottom: 10, marginTop: 12 },
-  empty:         { color: '#555', textAlign: 'center', marginTop: 40 },
-  card:          { backgroundColor: '#1a1a1a', borderRadius: 10, marginBottom: 10, overflow: 'hidden' },
-  cardMain:      { padding: 16, flexDirection: 'row', alignItems: 'center', gap: 12 },
-  avatar:        { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  avatarText:    { color: '#fff', fontSize: 16, fontWeight: '700' },
-  cardBody:      { flex: 1 },
-  cardName:      { color: '#fff', fontSize: 17, fontWeight: '600' },
-  cardStroke:    { color: '#888', fontSize: 13, marginTop: 2 },
-  cardLastSession: { color: '#555', fontSize: 11, marginTop: 2 },
-  cardArrow:       { color: '#555', fontSize: 24 },
-  editRow:       { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 8 },
-  editInput:     { flex: 1, backgroundColor: '#2a2a2a', color: '#fff', borderRadius: 6, paddingHorizontal: 10, paddingVertical: 6, fontSize: 14, borderWidth: 1, borderColor: '#444' },
-  editSaveBtn:   { backgroundColor: '#2196F3', borderRadius: 6, paddingHorizontal: 12, paddingVertical: 6 },
-  editSaveBtnText:{ color: '#fff', fontSize: 13, fontWeight: '600' },
-  editCancelText:{ color: '#555', fontSize: 18, paddingHorizontal: 4 },
-  editOffsetBtn:  { borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 8, alignItems: 'center' },
-  editOffsetText: { color: '#444', fontSize: 12 },
-  historyBtn:     { borderTopWidth: 1, borderTopColor: '#2a2a2a', paddingVertical: 8, alignItems: 'center' },
-  historyBtnText: { color: '#2196F3', fontSize: 12, fontWeight: '600' },
-  addForm:       { padding: 20, borderTopWidth: 1, borderTopColor: '#1a1a1a' },
-  input:         { backgroundColor: '#1a1a1a', color: '#fff', borderRadius: 8, paddingHorizontal: 16, paddingVertical: 12, fontSize: 16, marginBottom: 10, borderWidth: 1, borderColor: '#333' },
-  addButtons:    { flexDirection: 'row', gap: 10 },
-  btn:           { flex: 1, borderRadius: 8, paddingVertical: 12, alignItems: 'center' },
-  btnPrimary:    { backgroundColor: '#2196F3' },
-  btnSecondary:  { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: '#333' },
-  btnDisabled:   { opacity: 0.6 },
-  btnText:       { color: '#fff', fontWeight: '600', fontSize: 15 },
-  addBtn:        { margin: 20, backgroundColor: '#1a1a1a', borderRadius: 10, padding: 16, alignItems: 'center', borderWidth: 1, borderColor: '#333' },
-  addBtnText:    { color: '#2196F3', fontSize: 16, fontWeight: '600' },
-});

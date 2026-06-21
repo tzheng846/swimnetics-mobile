@@ -11,7 +11,9 @@ import VelocityChart from '../components/VelocityChart';
 import { API_BASE } from '../config';
 import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
+import { useUnits } from '../context/UnitsContext';
 import DataQualityCard from '../components/DataQualityCard';
+import { colors } from '../theme';
 
 // ── BLE constants ─────────────────────────────────────────────────────────────
 const NUS_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
@@ -100,7 +102,8 @@ export default function RecordScreen({ route, navigation }) {
 
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [markerLabel, setMarkerLabel] = useState('');
-  const [unit, setUnit] = useState('metric');
+  const { unit: unitPref, setUnit: setUnitPref } = useUnits();  // global m/yd pref (Settings)
+  const unit = unitPref === 'yd' ? 'imperial' : 'metric';
 
   const unitFactor = unit === 'imperial' ? 1.09361 : 1;
   const distUnit   = unit === 'imperial' ? 'yd' : 'm';
@@ -545,7 +548,7 @@ export default function RecordScreen({ route, navigation }) {
       {/* Device not connected — connection is managed in Config/Devices screens */}
       {!videoMode && notConnected && preResultState && (
         <View style={styles.statusArea}>
-          <Text style={[styles.statusText, { color: '#C0392B' }]}>⚠ Device not connected</Text>
+          <Text style={[styles.statusText, { color: colors.dangerOnDark }]}>⚠ Device not connected</Text>
           <Text style={styles.hintText}>
             Reconnect from the previous screen. A session recorded on the device is retained
             and can be retrieved after reconnecting.
@@ -578,7 +581,7 @@ export default function RecordScreen({ route, navigation }) {
               </>
             ) : (
               <View style={styles.row}>
-                <ActivityIndicator color="#1E3A5F" />
+                <ActivityIndicator color={colors.accent} />
                 <Text style={styles.statusText}> Starting camera…</Text>
               </View>
             )}
@@ -590,7 +593,7 @@ export default function RecordScreen({ route, navigation }) {
       {!videoMode && !(notConnected && preResultState) && bleState !== 'results' && <View style={styles.statusArea}>
         {bleState === 'ready' && (
           <>
-            <Text style={[styles.statusText, { color: '#27AE60' }]}>✓ {deviceLabel} connected</Text>
+            <Text style={[styles.statusText, { color: colors.good }]}>✓ {deviceLabel} connected</Text>
             <TouchableOpacity style={styles.primaryBtn} onPress={startRecording}>
               <Text style={styles.btnText}>Start Recording</Text>
             </TouchableOpacity>
@@ -622,7 +625,7 @@ export default function RecordScreen({ route, navigation }) {
         {bleState === 'retrieving' && (
           <>
             <View style={styles.row}>
-              <ActivityIndicator color="#1E3A5F" />
+              <ActivityIndicator color={colors.accent} />
               <Text style={styles.statusText}> Retrieving session…</Text>
             </View>
             <Text style={styles.counterLabel}>Samples</Text>
@@ -632,21 +635,21 @@ export default function RecordScreen({ route, navigation }) {
 
         {bleState === 'saving' && (
           <View style={styles.row}>
-            <ActivityIndicator color="#1E3A5F" />
+            <ActivityIndicator color={colors.accent} />
             <Text style={styles.statusText}> Saving...</Text>
           </View>
         )}
 
         {bleState === 'uploading' && (
           <View style={styles.row}>
-            <ActivityIndicator color="#1E3A5F" />
+            <ActivityIndicator color={colors.accent} />
             <Text style={styles.statusText}> Processing session...</Text>
           </View>
         )}
 
         {bleState === 'error' && (
           <>
-            <Text style={[styles.statusText, { color: '#C0392B', marginBottom: 4 }]}>
+            <Text style={[styles.statusText, { color: colors.dangerOnDark, marginBottom: 4 }]}>
               ⚠ Recording error
             </Text>
             {/* Actual cause — console logs are unreadable in a TestFlight build */}
@@ -711,7 +714,6 @@ export default function RecordScreen({ route, navigation }) {
               <>
                 <View style={styles.metricRow}>
                   <MetricItem label="Dist/Stroke"  value={fmtDist(apiResult.session?.mean_dps_m)}                          unit={distUnit} />
-                  <MetricItem label="Impulse"      value={fmtDist(apiResult.session?.mean_impulse_m)}                       unit={distUnit} />
                   <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
                 </View>
                 <View style={styles.metricRow}>
@@ -729,13 +731,13 @@ export default function RecordScreen({ route, navigation }) {
             <View style={styles.unitToggle}>
               <TouchableOpacity
                 style={[styles.unitBtn, unit === 'metric' && styles.unitBtnActive]}
-                onPress={() => setUnit('metric')}
+                onPress={() => setUnitPref('m')}
               >
                 <Text style={[styles.unitBtnText, unit === 'metric' && styles.unitBtnTextActive]}>m</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.unitBtn, unit === 'imperial' && styles.unitBtnActive]}
-                onPress={() => setUnit('imperial')}
+                onPress={() => setUnitPref('yd')}
               >
                 <Text style={[styles.unitBtnText, unit === 'imperial' && styles.unitBtnTextActive]}>yd</Text>
               </TouchableOpacity>
@@ -749,6 +751,7 @@ export default function RecordScreen({ route, navigation }) {
             unitFactor={unitFactor}
             unitLabel={velUnit}
             interactive
+            dark
           />
 
           {/* ── Time to Distance ── */}
@@ -926,57 +929,58 @@ function TimeToX({ timeArr, distArr, baselineEndS, headWaistM = 0, onMarkerChang
 }
 
 // ── Styles ─────────────────────────────────────────────────────────────────────
+// Immersive DARK record screen: bg = brand `text` purple, white cards float, light text on bg.
 const styles = StyleSheet.create({
-  container:    { flex: 1, backgroundColor: '#F5F7FA' },
+  container:    { flex: 1, backgroundColor: colors.text },
   header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 8 },
   headerCenter: { flex: 1, alignItems: 'center' },
-  title:        { fontSize: 22, fontWeight: '700', color: '#1E3A5F' },
-  backText:     { fontSize: 14, color: '#2196F3' },
-  signOutText:  { fontSize: 13, color: '#888' },
-  athleteLabel: { fontSize: 13, color: '#2196F3', marginTop: 2, textAlign: 'center' },
+  title:        { fontSize: 22, fontWeight: '700', color: colors.white },
+  backText:     { fontSize: 14, color: colors.accent },
+  signOutText:  { fontSize: 13, color: colors.textMuted },
+  athleteLabel: { fontSize: 13, color: colors.accent, marginTop: 2, textAlign: 'center' },
   statusArea:   { alignItems: 'center', paddingHorizontal: 24, minHeight: 160 },
   row:          { flexDirection: 'row', alignItems: 'center', marginTop: 16 },
-  primaryBtn:   { backgroundColor: '#1E3A5F', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12 },
-  secondaryBtn: { borderColor: '#1E3A5F', borderWidth: 1, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 28, marginTop: 12 },
-  secondaryBtnText: { color: '#1E3A5F', fontSize: 15, fontWeight: '600' },
-  stopBtn:      { backgroundColor: '#C0392B', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 20 },
-  btnText:      { color: '#FFF', fontSize: 16, fontWeight: '600' },
-  statusText:   { fontSize: 15, color: '#2C3E50', marginTop: 12, textAlign: 'center' },
-  hintText:     { fontSize: 12, color: '#95A5A6', marginTop: 8, textAlign: 'center', lineHeight: 17 },
-  counterLabel: { fontSize: 14, color: '#7F8C8D', marginTop: 20 },
-  counter:      { fontSize: 56, fontWeight: '700', color: '#1E3A5F' },
-  pathText:     { fontSize: 12, color: '#95A5A6', marginTop: 4, textAlign: 'center' },
-  errorDetail:  { fontSize: 13, color: '#C0392B', marginTop: 4, textAlign: 'center', paddingHorizontal: 8 },
-  sectionCard:  { backgroundColor: '#FFF', borderRadius: 12, padding: 14, marginBottom: 10 },
-  sectionTitle: { fontSize: 11, color: '#7F8C8D', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
+  primaryBtn:   { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12 },
+  secondaryBtn: { borderColor: colors.accent, borderWidth: 1, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 28, marginTop: 12 },
+  secondaryBtnText: { color: colors.accent, fontSize: 15, fontWeight: '600' },
+  stopBtn:      { backgroundColor: colors.needsWork, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 20 },
+  btnText:      { color: colors.white, fontSize: 16, fontWeight: '600' },
+  statusText:   { fontSize: 15, color: colors.white, marginTop: 12, textAlign: 'center' },
+  hintText:     { fontSize: 12, color: colors.textMuted, marginTop: 8, textAlign: 'center', lineHeight: 17 },
+  counterLabel: { fontSize: 14, color: colors.textMuted, marginTop: 20 },
+  counter:      { fontSize: 56, fontWeight: '700', color: colors.white },
+  pathText:     { fontSize: 12, color: colors.textMuted, marginTop: 4, textAlign: 'center' },
+  errorDetail:  { fontSize: 13, color: colors.dangerOnDark, marginTop: 4, textAlign: 'center', paddingHorizontal: 8 },
+  sectionCard:  { backgroundColor: colors.surface, borderRadius: 12, padding: 14, marginBottom: 10 },
+  sectionTitle: { fontSize: 11, color: colors.textSecondary, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10 },
   metricRow:    { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  metricLabel:  { fontSize: 11, color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 0.5 },
-  metricValue:  { fontSize: 22, fontWeight: '700', color: '#1E3A5F', marginTop: 2 },
-  metricUnit:   { fontSize: 11, color: '#95A5A6' },
+  metricLabel:  { fontSize: 11, color: colors.textSecondary, textTransform: 'uppercase', letterSpacing: 0.5 },
+  metricValue:  { fontSize: 22, fontWeight: '700', color: colors.text, marginTop: 2 },
+  metricUnit:   { fontSize: 11, color: colors.textMuted },
   chartHeader:  { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4, marginBottom: 6 },
-  chartTitle:   { fontSize: 11, fontWeight: '600', color: '#7F8C8D', textTransform: 'uppercase', letterSpacing: 1 },
+  chartTitle:   { fontSize: 11, fontWeight: '600', color: colors.textMuted, textTransform: 'uppercase', letterSpacing: 1 },
   unitToggle:   { flexDirection: 'row', gap: 6 },
-  unitBtn:      { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, backgroundColor: '#F0F2F5', borderWidth: 1, borderColor: '#E0E4EA' },
-  unitBtnActive:{ backgroundColor: '#1E3A5F', borderColor: '#1E3A5F' },
-  unitBtnText:  { fontSize: 12, fontWeight: '600', color: '#7F8C8D' },
-  unitBtnTextActive: { color: '#FFF' },
-  ttxValue:     { fontSize: 42, fontWeight: '700', color: '#1E3A5F' },
-  ttxLabel:     { fontSize: 14, color: '#7F8C8D', marginBottom: 4 },
-  ttxMax:       { fontSize: 11, color: '#B0B8C4', marginBottom: 12 },
+  unitBtn:      { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.08)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)' },
+  unitBtnActive:{ backgroundColor: colors.primary, borderColor: colors.primary },
+  unitBtnText:  { fontSize: 12, fontWeight: '600', color: colors.textMuted },
+  unitBtnTextActive: { color: colors.white },
+  ttxValue:     { fontSize: 42, fontWeight: '700', color: colors.text },
+  ttxLabel:     { fontSize: 14, color: colors.textSecondary, marginBottom: 4 },
+  ttxMax:       { fontSize: 11, color: colors.textMuted, marginBottom: 12 },
   ttxButtons:   { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginTop: 4 },
-  ttxBtn:       { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: '#F0F2F5', borderWidth: 1, borderColor: '#E0E4EA' },
-  ttxBtnActive: { backgroundColor: '#1E3A5F', borderColor: '#1E3A5F' },
-  ttxBtnText:   { fontSize: 14, fontWeight: '600', color: '#7F8C8D' },
-  ttxBtnTextActive: { color: '#FFF' },
-  noDetectText:    { fontSize: 13, color: '#95A5A6', fontStyle: 'italic', marginTop: 2 },
-  unreliableWarn:  { fontSize: 13, color: '#E67E22', fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
-  syncLine:     { fontSize: 11, color: '#95A5A6', textAlign: 'center', marginTop: 10 },
+  ttxBtn:       { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  ttxBtnActive: { backgroundColor: colors.primary, borderColor: colors.primary },
+  ttxBtnText:   { fontSize: 14, fontWeight: '600', color: colors.textSecondary },
+  ttxBtnTextActive: { color: colors.white },
+  noDetectText:    { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
+  unreliableWarn:  { fontSize: 13, color: colors.ok, fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
+  syncLine:     { fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: 10 },
   cameraWrap:   { flex: 1, paddingHorizontal: 20 },
   camera:       { width: '100%', aspectRatio: 3 / 4, borderRadius: 12, overflow: 'hidden' },
   cameraControls: { alignItems: 'center', paddingTop: 8 },
-  cameraTimer:  { fontSize: 40, fontWeight: '700', color: '#1E3A5F' },
-  overlayBtn:   { backgroundColor: '#2196F3', borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
+  cameraTimer:  { fontSize: 40, fontWeight: '700', color: colors.white },
+  overlayBtn:   { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
   saveStatus:   { fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 4 },
-  saveOk:       { color: '#27AE60' },
-  saveWarn:     { color: '#E67E22' },
+  saveOk:       { color: colors.good },
+  saveWarn:     { color: colors.ok },
 });

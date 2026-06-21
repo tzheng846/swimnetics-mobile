@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { Buffer } from 'buffer';
 import { useBle } from '../context/BleContext';
+import { colors } from '../theme';
 
 // ── BLE constants (mirror RecordScreen — no shared-plumbing refactor this plan) ──
 const NUS_SERVICE = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E';
@@ -50,25 +51,25 @@ function magnetVerdict(statusByte) {
   // (and an all-ones byte) as a wiring fault — NOT a magnet-position problem.
   if (statusByte === 0xFF || ((statusByte & ML_BIT) && (statusByte & MH_BIT))) {
     return {
-      color: '#C0392B',
+      color: colors.needsWork,
       title: 'SENSOR NOT RESPONDING',
       detail: 'The AS5600 isn’t answering on I2C — check its wiring (SDA→GPIO21, SCL→GPIO22, plus 3V3 and GND). This is a wiring fault, not a magnet position problem.',
     };
   }
   if (!(statusByte & MD_BIT)) {
     return {
-      color: '#C0392B',
+      color: colors.needsWork,
       title: 'NOT DETECTED',
       detail: 'No magnet seen. Check the AS5600 wiring (SDA→GPIO21, SCL→GPIO22) and that a magnet is mounted on the shaft. Recording is blocked until this clears.',
     };
   }
   if (statusByte & ML_BIT) {
-    return { color: '#E67E22', title: 'Too weak', detail: 'Magnet detected but signal is weak — magnet is too far from the sensor. Move it closer.' };
+    return { color: colors.ok, title: 'Too weak', detail: 'Magnet detected but signal is weak — magnet is too far from the sensor. Move it closer.' };
   }
   if (statusByte & MH_BIT) {
-    return { color: '#E67E22', title: 'Too strong', detail: 'Magnet detected but signal is too strong — magnet is too close to the sensor. Move it back slightly.' };
+    return { color: colors.ok, title: 'Too strong', detail: 'Magnet detected but signal is too strong — magnet is too close to the sensor. Move it back slightly.' };
   }
-  return { color: '#27AE60', title: 'Detected ✓', detail: 'Magnet is in range. Encoder can read.' };
+  return { color: colors.good, title: 'Detected ✓', detail: 'Magnet is in range. Encoder can read.' };
 }
 
 export default function DiagnosticsScreen({ navigation }) {
@@ -170,13 +171,13 @@ export default function DiagnosticsScreen({ navigation }) {
         <View style={st.card}>
           <View style={st.row}>
             <Text style={st.rowLabel}>Recording</Text>
-            <Text style={[st.rowValue, { color: status.recording ? '#27AE60' : '#888' }]}>
+            <Text style={[st.rowValue, { color: status.recording ? colors.good : colors.textMuted }]}>
               {status.recording ? 'ON' : 'off'}
             </Text>
           </View>
           <View style={st.row}>
             <Text style={st.rowLabel}>Buffered session</Text>
-            <Text style={[st.rowValue, { color: status.dataReady ? '#27AE60' : '#888' }]}>
+            <Text style={[st.rowValue, { color: status.dataReady ? colors.good : colors.textMuted }]}>
               {status.dataReady ? 'ready to upload' : 'none'}
             </Text>
           </View>
@@ -200,7 +201,7 @@ export default function DiagnosticsScreen({ navigation }) {
           </View>
           <View style={st.row}>
             <Text style={st.rowLabel}>Link</Text>
-            <Text style={[st.rowValue, { color: stale ? '#C0392B' : '#27AE60' }]}>
+            <Text style={[st.rowValue, { color: stale ? colors.needsWork : colors.good }]}>
               {stale ? 'no response' : 'live'}
             </Text>
           </View>
@@ -233,17 +234,17 @@ export default function DiagnosticsScreen({ navigation }) {
 }
 
 const st = StyleSheet.create({
-  container:    { flex: 1, backgroundColor: '#000' },
+  container:    { flex: 1, backgroundColor: colors.bg },
   header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 16 },
-  back:         { color: '#2196F3', fontSize: 14, width: 80 },
-  title:        { color: '#fff', fontSize: 15, fontWeight: '700', letterSpacing: 1 },
+  back:         { color: colors.primary, fontSize: 14, width: 80 },
+  title:        { color: colors.text, fontSize: 15, fontWeight: '700', letterSpacing: 1 },
 
-  sectionLabel: { color: '#888', fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10, marginTop: 8 },
-  card:         { backgroundColor: '#1a1a1a', borderRadius: 10, padding: 16, marginBottom: 12 },
+  sectionLabel: { color: colors.textSecondary, fontSize: 11, fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10, marginTop: 8 },
+  card:         { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 16, marginBottom: 12 },
   row:          { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
-  rowLabel:     { color: '#aaa', fontSize: 14 },
-  rowValue:     { color: '#fff', fontSize: 16, fontWeight: '700' },
-  detail:       { color: '#777', fontSize: 12, lineHeight: 17, marginTop: 4 },
-  divider:      { borderTopWidth: 1, borderTopColor: '#222', marginVertical: 12 },
-  empty:        { color: '#555', textAlign: 'center', marginTop: 40, lineHeight: 22 },
+  rowLabel:     { color: colors.textSecondary, fontSize: 14 },
+  rowValue:     { color: colors.text, fontSize: 16, fontWeight: '700' },
+  detail:       { color: colors.textMuted, fontSize: 12, lineHeight: 17, marginTop: 4 },
+  divider:      { borderTopWidth: 1, borderTopColor: colors.border, marginVertical: 12 },
+  empty:        { color: colors.textMuted, textAlign: 'center', marginTop: 40, lineHeight: 22 },
 });

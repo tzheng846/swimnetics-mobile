@@ -8,6 +8,7 @@ import { BleProvider } from './src/context/BleContext';
 import { UnitsProvider } from './src/context/UnitsContext';
 import LoginScreen from './src/screens/LoginScreen';
 import RootTabs from './src/navigation/RootTabs';
+import UploadToast from './src/components/UploadToast';
 import { colors } from './src/theme';
 
 function Navigation() {
@@ -33,6 +34,8 @@ export default function App() {
             <NavigationContainer>
               <StatusBar style="dark" />
               <Navigation />
+              {/* Global background-upload surface — overlays every screen (Phase 47-03) */}
+              <UploadToast />
             </NavigationContainer>
           </BleProvider>
         </UnitsProvider>

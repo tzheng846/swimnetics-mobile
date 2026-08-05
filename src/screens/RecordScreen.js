@@ -9,10 +9,15 @@ import { Buffer } from 'buffer';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import VelocityChart from '../components/VelocityChart';
 import { API_BASE } from '../config';
+import { enqueue as enqueueVideoUpload } from '../lib/videoUploadQueue';
 import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
 import { useUnits } from '../context/UnitsContext';
 import DataQualityCard from '../components/DataQualityCard';
+import StartSequenceOverlay from '../components/StartSequenceOverlay';
+import useStartSequence from '../hooks/useStartSequence';
+import { parseStatus, magnetVerdict } from '../lib/deviceStatus';
+import { uploadReason } from '../lib/friendlyError';
 import { colors } from '../theme';
 
 // ── BLE constants ─────────────────────────────────────────────────────────────
@@ -55,8 +60,11 @@ function parsePacket(base64) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function RecordScreen({ route, navigation }) {
-  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null } = route?.params ?? {};
+  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null, startSequence = true } = route?.params ?? {};
   useEffect(() => { navigation.setOptions({ gestureEnabled: false }); }, []);
+
+  // Race-start cue (3-2-1 → "take your marks" → random hold → blare). Gates START.
+  const seq = useStartSequence();
 
   const { session, signOut } = useAuth();
   const sessionRef = useRef(session);
@@ -82,6 +90,7 @@ export default function RecordScreen({ route, navigation }) {
   const [videoUri, setVideoUri]               = useState(null);
   const [videoStartPhoneMs, setVideoStartPhoneMs] = useState(null);
   const cameraRef             = useRef(null);
+  const videoUriRef           = useRef(null);  // mirror of videoUri — uploadAndProcess reads it without a dep
   const videoOrchestratedRef  = useRef(false); // onCameraReady can re-fire on remount
   const stopRequestedRef      = useRef(false); // stop tapped before recordAsync started
   const stopVideoRef          = useRef(null);  // lets onCameraReady auto-stop without a dep cycle
@@ -161,6 +170,46 @@ export default function RecordScreen({ route, navigation }) {
     ]);
   }, []);
 
+  // ── Pre-record encoder health check ───────────────────────────────────────────
+  // One STATUS round-trip before arming. If the magnet/sensor can't read, warn with the
+  // specific cause and let the coach Record-anyway or Cancel — never a hard block (STATUS
+  // can false-negative). Returns true when it's OK to proceed. If status can't be read,
+  // we don't block (the START write still guards a real disconnect).
+  const checkEncoder = useCallback(async () => {
+    if (connectionStatus !== 'connected' || !deviceRef.current) return true;
+    const status = await new Promise((resolve) => {
+      let done = false;
+      let sub = null;
+      const finish = (val) => { if (done) return; done = true; sub?.remove(); clearTimeout(t); resolve(val); };
+      const t = setTimeout(() => finish(null), 2000);
+      try {
+        sub = deviceRef.current.monitorCharacteristicForService(
+          NUS_SERVICE, NUS_TX_CHAR,
+          (err, ch) => {
+            if (err) return finish(null);
+            const parsed = parseStatus(ch?.value);
+            if (parsed) finish(parsed);
+          },
+        );
+        writeCmd('STATUS').catch(() => finish(null));
+      } catch { finish(null); }
+    });
+    if (!status) return true; // couldn't read STATUS — don't block
+    const v = magnetVerdict(status.statusByte);
+    if (!v.hardFault) return true;
+    return new Promise((resolve) => {
+      Alert.alert(
+        `Encoder: ${v.title}`,
+        `${v.detail}\n\nRecord anyway?`,
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
+          { text: 'Record anyway', style: 'destructive', onPress: () => resolve(true) },
+        ],
+        { cancelable: false },
+      );
+    });
+  }, [connectionStatus, writeCmd]);
+
   // ── Save CSV ─────────────────────────────────────────────────────────────────
   const saveCSV = useCallback(async (samples) => {
     log(`Saving ${samples.length} samples to CSV...`);
@@ -210,16 +259,42 @@ export default function RecordScreen({ route, navigation }) {
         return;
       }
       if (result.status < 200 || result.status >= 300) {
-        throw new Error(`API ${result.status}: ${result.body.slice(0, 120)}`);
+        log(`Upload failed: API ${result.status}: ${result.body.slice(0, 120)}`, 'error');
+        setErrorMsg(uploadReason(null, result.status));
+        setBleState('error');
+        return;
       }
 
-      const data = JSON.parse(result.body);
+      let data;
+      try {
+        data = JSON.parse(result.body);
+      } catch (pe) {
+        log(`Upload response parse failed: ${pe.message}`, 'error');
+        setErrorMsg(uploadReason(pe));
+        setBleState('error');
+        return;
+      }
       log(`Upload complete. Stroke rate: ${data.session?.stroke_rate_spm?.toFixed(1)} SPM`, 'ok');
       setApiResult(data);
       setBleState('results');
+      // Background video upload (Phase 47-03) — fire-and-forget into the app-wide FIFO
+      // queue; the global UploadToast reports progress. Must never block or throw into
+      // the results flow.
+      if (videoUriRef.current && data.session_id) {
+        try {
+          enqueueVideoUpload({
+            sessionId: data.session_id,
+            uri: videoUriRef.current,
+            label: sessionName || 'Session video',
+          });
+        } catch (qe) {
+          log(`Video upload enqueue failed: ${qe.message}`, 'warn');
+        }
+      }
     } catch (e) {
+      // Network / offline / native upload failure — the CSV is still saved locally.
       log(`Upload failed: ${e.message}`, 'error');
-      setErrorMsg(`Upload failed: ${e.message}`);
+      setErrorMsg(uploadReason(e));
       setBleState('error');
     }
   }, [log, athleteId, headWaistM, strokeType, sessionName, sessionNotes, chipId]);
@@ -366,6 +441,20 @@ export default function RecordScreen({ route, navigation }) {
     }
   }, [log, writeCmd]);
 
+  // Plain-record entry: guard connection + encoder, run the race-start cue (if enabled),
+  // then START on the blare.
+  const beginPlain = useCallback(async () => {
+    if (connectionStatus !== 'connected') {
+      Alert.alert('Not Connected', 'Reconnect to the device before recording.');
+      return;
+    }
+    const okEncoder = await checkEncoder();
+    if (!okEncoder) return;
+    if (!startSequence) { startRecording(); return; }
+    const r = await seq.run();
+    if (!r.canceled) startRecording();
+  }, [connectionStatus, checkEncoder, startSequence, seq, startRecording]);
+
   const stopRecording = useCallback(async () => {
     if (isStoppingRef.current) { log('stopRecording called twice — ignoring', 'warn'); return; }
     isStoppingRef.current = true;
@@ -387,6 +476,8 @@ export default function RecordScreen({ route, navigation }) {
       Alert.alert('Not Connected', 'Reconnect to the device before recording.');
       return;
     }
+    const okEncoder = await checkEncoder();
+    if (!okEncoder) return;
     if (!camPermission?.granted) {
       const res = await requestCamPermission();
       if (!res.granted) {
@@ -404,10 +495,11 @@ export default function RecordScreen({ route, navigation }) {
     setSavedPath(null);
     setApiResult(null);
     setVideoUri(null);
+    videoUriRef.current = null;
     setVideoStartPhoneMs(null);
     videoOrchestratedRef.current = false;
     setVideoMode(true); // mounts CameraView → onCameraReady runs the orchestration
-  }, [connectionStatus, camPermission, micPermission, requestCamPermission, requestMicPermission]);
+  }, [connectionStatus, checkEncoder, camPermission, micPermission, requestCamPermission, requestMicPermission]);
 
   // Failsafe: if onCameraReady never fires (camera in use / hardware issue),
   // don't leave the user on an infinite "Starting camera…" spinner.
@@ -427,6 +519,12 @@ export default function RecordScreen({ route, navigation }) {
   const onCameraReady = useCallback(async () => {
     if (videoOrchestratedRef.current) return; // remount guard
     videoOrchestratedRef.current = true;
+
+    // Race-start cue over the live preview; START fires on the blare (with recordAsync).
+    if (startSequence) {
+      const r = await seq.run();
+      if (r.canceled) { setVideoMode(false); return; }
+    }
 
     try {
       await writeCmd('START');
@@ -462,6 +560,7 @@ export default function RecordScreen({ route, navigation }) {
       const result = await recPromise;
       if (result?.uri) {
         setVideoUri(result.uri);
+        videoUriRef.current = result.uri;
         log(`Video saved: ${result.uri.split('/').pop()}`, 'ok');
       } else {
         log('Video recording ended without a file', 'warn');
@@ -478,7 +577,7 @@ export default function RecordScreen({ route, navigation }) {
         stopVideoRef.current?.();
       }
     }
-  }, [writeCmd, log]);
+  }, [writeCmd, log, startSequence, seq]);
 
   const stopVideoRecording = useCallback(async () => {
     if (isStoppingRef.current) { log('stopVideoRecording called twice — ignoring', 'warn'); return; }
@@ -514,6 +613,7 @@ export default function RecordScreen({ route, navigation }) {
     setElapsedS(0);
     setVideoMode(false);
     setVideoUri(null);
+    videoUriRef.current = null;
     setVideoStartPhoneMs(null);
     videoOrchestratedRef.current = false;
     stopRequestedRef.current = false;
@@ -594,7 +694,7 @@ export default function RecordScreen({ route, navigation }) {
         {bleState === 'ready' && (
           <>
             <Text style={[styles.statusText, { color: colors.good }]}>✓ {deviceLabel} connected</Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={startRecording}>
+            <TouchableOpacity style={styles.primaryBtn} onPress={beginPlain}>
               <Text style={styles.btnText}>Start Recording</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.secondaryBtn} onPress={startVideoRecording}>
@@ -634,17 +734,23 @@ export default function RecordScreen({ route, navigation }) {
         )}
 
         {bleState === 'saving' && (
-          <View style={styles.row}>
-            <ActivityIndicator color={colors.accent} />
-            <Text style={styles.statusText}> Saving...</Text>
-          </View>
+          <>
+            <View style={styles.row}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.statusText}> Saving...</Text>
+            </View>
+            <Text style={styles.counterLabel}>Retrieved {sampleCount.toLocaleString()} samples</Text>
+          </>
         )}
 
         {bleState === 'uploading' && (
-          <View style={styles.row}>
-            <ActivityIndicator color={colors.accent} />
-            <Text style={styles.statusText}> Processing session...</Text>
-          </View>
+          <>
+            <View style={styles.row}>
+              <ActivityIndicator color={colors.accent} />
+              <Text style={styles.statusText}> Processing session...</Text>
+            </View>
+            <Text style={styles.counterLabel}>Retrieved {sampleCount.toLocaleString()} samples</Text>
+          </>
         )}
 
         {bleState === 'error' && (
@@ -655,12 +761,26 @@ export default function RecordScreen({ route, navigation }) {
             {/* Actual cause — console logs are unreadable in a TestFlight build */}
             {errorMsg && <Text style={styles.errorDetail}>{errorMsg}</Text>}
             {savedPath && <Text style={styles.pathText}>{savedPath.split('/').pop()}</Text>}
-            <Text style={styles.hintText}>
-              If the device still holds the session, reconnect and tap Retrieve from Device.
-            </Text>
-            <TouchableOpacity style={styles.primaryBtn} onPress={reset}>
-              <Text style={styles.btnText}>Try Again</Text>
-            </TouchableOpacity>
+            {savedPath ? (
+              // The session CSV is saved on the phone — let the coach re-send it, no re-record.
+              <>
+                <TouchableOpacity style={styles.primaryBtn} onPress={() => uploadAndProcess(savedPath)}>
+                  <Text style={styles.btnText}>Retry Upload</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.secondaryBtn} onPress={reset}>
+                  <Text style={styles.secondaryBtnText}>Discard &amp; Start Over</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={styles.hintText}>
+                  If the device still holds the session, reconnect and tap Retrieve from Device.
+                </Text>
+                <TouchableOpacity style={styles.primaryBtn} onPress={reset}>
+                  <Text style={styles.btnText}>Try Again</Text>
+                </TouchableOpacity>
+              </>
+            )}
           </>
         )}
       </View>}
@@ -780,6 +900,7 @@ export default function RecordScreen({ route, navigation }) {
                 sessionStartPhoneMs,
                 videoUri,
                 videoStartPhoneMs,
+                sessionId: apiResult.session_id ?? null, // enables cloud sync-origin save
               })}
             >
               <Text style={styles.btnText}>▶ View Video Overlay</Text>
@@ -815,6 +936,8 @@ export default function RecordScreen({ route, navigation }) {
 
         </ScrollView>
       )}
+
+      <StartSequenceOverlay phase={seq.phase} onCancel={seq.cancel} />
       </View>
 
     </SafeAreaView>

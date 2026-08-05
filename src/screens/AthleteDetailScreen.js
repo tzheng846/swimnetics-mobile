@@ -134,8 +134,14 @@ export default function AthleteDetailScreen({ route, navigation }) {
           <Button
             title="Record"
             variant="secondary"
-            onPress={() => navigation.navigate('RecordingConfig', {
-              athleteId: athlete.athlete_id, athleteName: athlete.name, defaultStrokeType: athlete.stroke_type,
+            // Nested form is required: this screen is on the Root stack and RecordingConfig is a
+            // child of Tabs. navigate() only bubbles UP to parents, never down into a child
+            // navigator, so navigate('RecordingConfig') went unhandled and did nothing at all.
+            onPress={() => navigation.navigate('Tabs', {
+              screen: 'RecordingConfig',
+              params: {
+                athleteId: athlete.athlete_id, athleteName: athlete.name, defaultStrokeType: athlete.stroke_type,
+              },
             })}
             style={{ flex: 1 }}
           />

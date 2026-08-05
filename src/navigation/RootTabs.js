@@ -18,9 +18,16 @@ import CompareScreen from '../screens/CompareScreen';
 const Tab = createBottomTabNavigator();
 const Root = createNativeStackNavigator();
 
-// Four tab homes. Route names match existing navigate() targets so cross-screen
-// navigation keeps working: "RecordingConfig" (Record island) and "SessionHistory"
-// (History) are reached by name from AthletesScreen.
+// Four tab homes. A plain navigate('RecordingConfig') works only from a TAB SIBLING (e.g.
+// AthletesScreen) — navigate() resolves a route name by bubbling UP through parent navigators and
+// never descends into a child navigator. Screens on the Root stack below (AthleteDetail, ReportCard,
+// Compare, …) must therefore use the nested form to reach a tab:
+//     navigation.navigate('Tabs', { screen: 'RecordingConfig', params: { … } })
+// Getting this wrong fails SILENTLY — the action reaches the top unhandled and is dropped, which is
+// exactly how AthleteDetail's Record button did nothing from Phase 38-03 until Phase 55-01.
+//
+// Note these tab screens mount once per app launch and never remount: read route params in an
+// effect, not in a useState initializer, and refetch data with useFocusEffect rather than on mount.
 function Tabs() {
   return (
     <Tab.Navigator screenOptions={{ headerShown: false }} tabBar={(props) => <TabBar {...props} />}>

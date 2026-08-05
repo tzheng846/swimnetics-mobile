@@ -1,9 +1,11 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, SafeAreaView, StyleSheet,
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import VelocityChart from '../components/VelocityChart';
+import { API_BASE } from '../config';
+import { supabase } from '../lib/supabase';
 import { colors } from '../theme';
 
 // ── Pure helper ────────────────────────────────────────────────────────────────
@@ -32,19 +34,23 @@ const NUDGE_STEPS = [-0.5, -0.1, 0.1, 0.5];
 
 // ── Screen ─────────────────────────────────────────────────────────────────────
 // Synced playback: tether_t = video currentTime + video_origin_s + manualOffsetS.
-// video_origin_s comes from two phone-wall-clock anchors captured at record time
-// (META-derived sessionStartPhoneMs, app-timestamped videoStartPhoneMs).
+// END-ANCHOR: the camera and the device stop on the same tap, so their END phone times
+// match. The video's first frame therefore sits at (deviceDuration − videoDuration) in the
+// device timeline. This is warm-up-agnostic — unlike the old anchor (videoStartPhoneMs was
+// stamped at the recordAsync() call, ~camera-warm-up before the first frame → ~2 s off).
 export default function VideoOverlayScreen({ route, navigation }) {
-  const { time, velocity, sessionStartPhoneMs, videoUri, videoStartPhoneMs } = route?.params ?? {};
+  const { time, velocity, videoUri, sessionId } = route?.params ?? {};
 
   // Velocity arrays live in a ref — they never change and must not re-enter
   // effect deps at the ~20 Hz marker update rate.
   const dataRef = useRef({ time: time ?? [], velocity: velocity ?? [] });
 
-  // Guard the origin: a missing timestamp would make it NaN and silently kill
-  // the marker/readout with no visible cause.
-  const haveSyncAnchors = sessionStartPhoneMs != null && videoStartPhoneMs != null;
-  const videoOriginS = haveSyncAnchors ? (sessionStartPhoneMs - videoStartPhoneMs) / 1000 : 0;
+  // Device recording duration (s) from the sample times.
+  const deviceDurationS = time?.length ? time[time.length - 1] - time[0] : 0;
+  // Video duration (s) — read from the player once it loads its metadata (async).
+  const [videoDurationS, setVideoDurationS] = useState(null);
+  // Origin is null until the video duration is known (marker stays inert rather than guessing).
+  const videoOriginS = videoDurationS != null ? deviceDurationS - videoDurationS : null;
   const [manualOffsetS, setManualOffsetS] = useState(0);
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [readoutVel, setReadoutVel] = useState(null);
@@ -58,14 +64,19 @@ export default function VideoOverlayScreen({ route, navigation }) {
   // stale. Polling tracks play, pause, and scrub uniformly.
   useEffect(() => {
     const id = setInterval(() => {
-      let t;
+      let t, dur;
       try {
         t = player.currentTime; // throws if the player was released mid-tick
+        dur = player.duration;
       } catch {
         clearInterval(id);
         return;
       }
-      if (t == null || isNaN(t)) return;
+      // Capture the video duration once it loads — it drives the end-anchored origin.
+      if (dur != null && !isNaN(dur) && dur > 0) {
+        setVideoDurationS(prev => (prev === dur ? prev : dur));
+      }
+      if (t == null || isNaN(t) || videoOriginS == null) return; // wait for duration → origin
       const tetherT = t + videoOriginS + manualOffsetS;
       setMarkerTimeS(prev => (prev === tetherT ? prev : tetherT));
       setReadoutVel(interpVelocity(dataRef.current.time, dataRef.current.velocity, tetherT));
@@ -77,13 +88,57 @@ export default function VideoOverlayScreen({ route, navigation }) {
     setManualOffsetS(o => Math.max(-NUDGE_LIMIT_S, Math.min(NUDGE_LIMIT_S, +(o + step).toFixed(1))));
   };
 
-  if (!videoUri || !time?.length || !haveSyncAnchors) {
+  // ── Cloud sync-origin save (Phase 47-03) ──────────────────────────────────────
+  // Persist video_origin_s = end-anchored origin + manual nudge so the web annotate
+  // page opens aligned. Origin-only POST — string-only FormData is Hermes-safe (the
+  // known RN crash is the {uri,name,type} FILE pattern). No sessionId → no calls.
+  const [syncSaveState, setSyncSaveState] = useState(null); // 'saved' | 'failed' | null
+  const originSavedOnceRef = useRef(false);
+  const originDebounceRef = useRef(null);
+
+  const saveOrigin = useCallback(async (v) => {
+    if (!sessionId) return;
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data?.session?.access_token;
+      if (!token) throw new Error('Not signed in');
+      const fd = new FormData();
+      fd.append('video_origin_s', String(v));
+      const resp = await fetch(`${API_BASE}/sessions/${sessionId}/video`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: fd,
+      });
+      if (!resp.ok) throw new Error(`API ${resp.status}`);
+      setSyncSaveState('saved');
+    } catch {
+      setSyncSaveState('failed');
+    }
+  }, [sessionId]);
+
+  // Post once as soon as the end-anchored origin is known.
+  useEffect(() => {
+    if (videoOriginS == null || !sessionId || originSavedOnceRef.current) return;
+    originSavedOnceRef.current = true;
+    saveOrigin(videoOriginS + manualOffsetS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [videoOriginS, sessionId, saveOrigin]);
+
+  // Re-post (debounced) when the user nudges the sync offset.
+  useEffect(() => {
+    if (!originSavedOnceRef.current || videoOriginS == null || !sessionId) return;
+    clearTimeout(originDebounceRef.current);
+    originDebounceRef.current = setTimeout(() => saveOrigin(videoOriginS + manualOffsetS), 1000);
+    return () => clearTimeout(originDebounceRef.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manualOffsetS]);
+
+  if (!videoUri || !time?.length) {
     return (
       <SafeAreaView style={styles.container}>
         <Text style={styles.statusText}>
           {!videoUri ? 'No video file was provided.'
-            : !time?.length ? 'No session velocity data was provided.'
-            : 'Missing sync timestamps — cannot align video and session.'}
+            : 'No session velocity data was provided.'}
         </Text>
         <TouchableOpacity style={styles.primaryBtn} onPress={() => navigation.goBack()}>
           <Text style={styles.btnText}>‹ Back</Text>
@@ -131,12 +186,13 @@ export default function VideoOverlayScreen({ route, navigation }) {
       <Text style={styles.nudgeLabel}>
         Sync offset: {manualOffsetS >= 0 ? '+' : ''}{manualOffsetS.toFixed(1)} s
       </Text>
-      {/* Sync debug — origin is the computed metadata alignment; if the overlay is
-          consistently off by a fixed amount, this is the number to report */}
+      {/* Sync debug — origin = deviceDuration − videoDuration (end-anchored). If the overlay
+          is consistently off by a fixed amount, this is the number to report */}
       <Text style={styles.debugLine}>
-        origin {videoOriginS >= 0 ? '+' : ''}{videoOriginS.toFixed(2)} s
-        {'  ·  '}session start {new Date(sessionStartPhoneMs).toISOString().slice(11, 23)}
-        {'  ·  '}video start {new Date(videoStartPhoneMs).toISOString().slice(11, 23)}
+        origin {videoOriginS != null ? `${videoOriginS >= 0 ? '+' : ''}${videoOriginS.toFixed(2)} s` : '— (loading)'}
+        {'  ·  '}device {deviceDurationS.toFixed(1)} s
+        {'  ·  '}video {videoDurationS != null ? videoDurationS.toFixed(1) : '—'} s
+        {syncSaveState === 'saved' ? '  ·  sync saved ✓' : syncSaveState === 'failed' ? '  ·  sync save failed' : ''}
       </Text>
     </SafeAreaView>
   );

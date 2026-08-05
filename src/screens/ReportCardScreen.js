@@ -66,6 +66,7 @@ export default function ReportCardScreen({ route, navigation }) {
   const [sessionData, setSessionData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const [sessionName, setSessionName] = useState(null);
   const [isStarred, setIsStarred]     = useState(false);
   const [notes, setNotes]             = useState(null);
@@ -84,14 +85,24 @@ export default function ReportCardScreen({ route, navigation }) {
   useEffect(() => { navigation.setOptions({ gestureEnabled: false }); }, []);
 
   useEffect(() => {
+    let cancelled = false;
     async function fetchSession() {
+      setLoading(true);
+      setError(null);
       try {
         const { data, error: err } = await supabase
           .from('sessions')
           .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at')
           .eq('id', sessionId)
           .single();
-        if (err) throw err;
+        if (err) {
+          // PGRST116 = no row matched .single() → the session is gone.
+          if (err.code === 'PGRST116') throw new Error('not-found');
+          throw err;
+        }
+        if (!data) throw new Error('not-found');
+        if (!data.metrics_json) throw new Error('incomplete');
+        if (cancelled) return;
         setSessionData(data);
         setSessionName(data.name ?? null);
         setIsStarred(data.is_starred ?? false);
@@ -106,16 +117,22 @@ export default function ReportCardScreen({ route, navigation }) {
             .lt('created_at', data.created_at)
             .order('created_at', { ascending: false })
             .limit(1);
-          setPrevSessionId(prev?.[0]?.id ?? null);
+          if (!cancelled) setPrevSessionId(prev?.[0]?.id ?? null);
         }
       } catch (e) {
-        setError('Failed to load session.');
+        if (cancelled) return;
+        const msg = e?.message || '';
+        if (msg === 'not-found') setError('Session not found. It may have been deleted.');
+        else if (msg === 'incomplete') setError("This session's data looks incomplete — it can't be displayed.");
+        else if (/network|fetch|offline|connection|load failed/i.test(msg)) setError('You appear to be offline. Check your connection and tap Retry.');
+        else setError('Failed to load session.');
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
     fetchSession();
-  }, [sessionId]);
+    return () => { cancelled = true; };
+  }, [sessionId, reloadKey]);
 
   if (loading) {
     return (
@@ -134,9 +151,15 @@ export default function ReportCardScreen({ route, navigation }) {
           </TouchableOpacity>
           <View style={{ width: 60 }} />
         </View>
-        <Text style={{ color: colors.needsWork, textAlign: 'center', marginTop: 40 }}>
+        <Text style={{ color: colors.needsWork, textAlign: 'center', marginTop: 40, paddingHorizontal: 24, lineHeight: 22 }}>
           {error ?? 'Failed to load session.'}
         </Text>
+        <TouchableOpacity
+          onPress={() => { setLoading(true); setReloadKey(k => k + 1); }}
+          style={{ alignSelf: 'center', marginTop: 20, paddingVertical: 11, paddingHorizontal: 28, backgroundColor: colors.primary, borderRadius: 8 }}
+        >
+          <Text style={{ color: colors.white, fontWeight: '600' }}>Retry</Text>
+        </TouchableOpacity>
       </SafeAreaView>
     );
   }
@@ -165,8 +188,11 @@ export default function ReportCardScreen({ route, navigation }) {
     backstroke: 'Backstroke', butterfly: 'Butterfly',
     im: 'Individual Medley', udk: 'Underwater Dolphin Kick',
   };
-  // null stroke_type = legacy session = show full analytics
-  const isAnalyticsReady = !strokeType || strokeType === 'breaststroke';
+  // Phase 54: the breaststroke-only gate is lifted — every stroke shows full analytics, matching
+  // the backend (ratings.py now bands all strokes) and the web portal, which never gated at all.
+  // To restore: `!strokeType || strokeType === 'breaststroke'`. All usage sites below are kept
+  // intact, including the !isAnalyticsReady "Coming Soon" branch, so this stays a one-line revert.
+  const isAnalyticsReady = true;
 
   async function exportCsv() {
     if (vel.length === 0) {

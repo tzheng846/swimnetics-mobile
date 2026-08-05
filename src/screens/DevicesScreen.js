@@ -6,12 +6,13 @@ import {
 } from 'react-native';
 import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
+import { bleReason } from '../lib/friendlyError';
 import { API_BASE } from '../config';
 import { colors } from '../theme';
 
 export default function DevicesScreen({ navigation }) {
   const { session } = useAuth();
-  const { manager, connectedDevice, connectionStatus, knownDevices, connectToDevice, forgetDevice } = useBle();
+  const { manager, connectedDevice, connectionStatus, knownDevices, ensureBleReady, connectToDevice, forgetDevice } = useBle();
 
   // ── Supabase-registered devices ───────────────────────────────────────────────
   const [devices, setDevices]             = useState([]);
@@ -79,16 +80,28 @@ export default function DevicesScreen({ navigation }) {
   const [pairScanning, setPairScanning] = useState(false);
   const [pairFound, setPairFound]       = useState([]);
   const [pairConnecting, setPairConnecting] = useState(null); // bleId being connected
+  const [pairMsg, setPairMsg]           = useState(null);     // specific reason / "nothing found"
   const pairTimerRef = useRef(null);
   const pairSeenRef  = useRef(new Set());
 
-  const startPairScan = () => {
+  const startPairScan = async () => {
+    setPairMsg(null);
+    // Pre-flight: don't scan into the void if Bluetooth is off / unauthorized.
+    const ready = await ensureBleReady();
+    if (!ready.ok) { setPairMsg(ready.reason); return; }
+
     setPairFound([]);
     pairSeenRef.current = new Set();
     setPairScanning(true);
 
     manager.startDeviceScan(null, { allowDuplicates: false }, (error, device) => {
-      if (error) { setPairScanning(false); return; }
+      if (error) {
+        clearTimeout(pairTimerRef.current);
+        manager.stopDeviceScan();
+        setPairScanning(false);
+        setPairMsg(bleReason(error));
+        return;
+      }
       if (device?.name?.startsWith('SwimLogger') && !pairSeenRef.current.has(device.id)) {
         pairSeenRef.current.add(device.id);
         setPairFound(prev => [...prev, { id: device.id, name: device.name }]);
@@ -98,6 +111,11 @@ export default function DevicesScreen({ navigation }) {
     pairTimerRef.current = setTimeout(() => {
       manager.stopDeviceScan();
       setPairScanning(false);
+      // Only flag "nothing found" if the scan truly turned up no SwimLogger.
+      setPairFound(prev => {
+        if (prev.length === 0) setPairMsg('No SwimLogger found. Make sure the device is powered on and nearby, then scan again.');
+        return prev;
+      });
     }, 8000);
   };
 
@@ -106,12 +124,14 @@ export default function DevicesScreen({ navigation }) {
     manager.stopDeviceScan();
     setPairScanning(false);
     setPairFound([]);
+    setPairMsg(null);
   };
 
   const handlePairDevice = async (bleId) => {
     clearTimeout(pairTimerRef.current);
     manager.stopDeviceScan();
     setPairScanning(false);
+    setPairMsg(null);
     setPairConnecting(bleId);
     try {
       await connectToDevice(bleId);
@@ -219,6 +239,8 @@ export default function DevicesScreen({ navigation }) {
         </View>
       )}
 
+      {pairMsg ? <Text style={st.pairMsg}>{pairMsg}</Text> : null}
+
       {pairFound.map(d => (
         <TouchableOpacity
           key={d.id}
@@ -301,6 +323,7 @@ const st = StyleSheet.create({
   cancelText:    { color: colors.needsWork, fontSize: 13, fontWeight: '600' },
   foundItem:     { backgroundColor: colors.surfaceAlt, borderRadius: 8, padding: 12, marginBottom: 8, marginTop: 4 },
   foundName:     { color: colors.text, fontSize: 15, fontWeight: '500' },
+  pairMsg:       { color: colors.textSecondary, fontSize: 13, lineHeight: 18, marginTop: 8, marginBottom: 4 },
 
   // Diagnostics entry
   diagBtn:       { backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 12, alignItems: 'center', marginTop: 12 },

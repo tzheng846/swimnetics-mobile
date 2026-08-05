@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 import { AppState } from 'react-native';
 import { BleManager } from 'react-native-ble-plx';
 import * as SecureStore from 'expo-secure-store';
+import { bleStateReason, bleReason } from '../lib/friendlyError';
 
 const STORAGE_KEY = 'swimnetics_known_devices';
 
@@ -46,12 +47,33 @@ export function BleProvider({ children }) {
     await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(devices));
   };
 
+  // Pre-flight: is the BLE adapter usable? Returns { ok, reason } — reason names the
+  // exact cause (off / permission denied / unsupported) so callers can show it.
+  const ensureBleReady = async () => {
+    try {
+      const state = await manager.state();
+      const reason = bleStateReason(state);
+      return { ok: !reason, reason };
+    } catch {
+      return { ok: false, reason: 'Bluetooth is not ready yet. Wait a moment and try again.' };
+    }
+  };
+
   // Connect to a device by its BLE ID (no scan needed if ID is known).
   // Derives chipId from device.name — firmware uses "SwimLogger-XXXXXX" format.
+  // Adds a 10 s connect timeout + one auto-retry so the spinner can never hang;
+  // throws an Error whose message is an already-friendly reason.
   const connectToDevice = async (bleId) => {
     setConnectionStatus('connecting');
+    const attempt = () => manager.connectToDevice(bleId, { timeout: 10000 });
     try {
-      const device = await manager.connectToDevice(bleId);
+      let device;
+      try {
+        device = await attempt();
+      } catch (firstErr) {
+        // One auto-retry — covers transient timeouts / a missed first advertisement.
+        device = await attempt();
+      }
       await device.discoverAllServicesAndCharacteristics();
 
       // Derive chipId from BLE name ("SwimLogger-A1B2C3" → "A1B2C3")
@@ -80,7 +102,7 @@ export function BleProvider({ children }) {
       return device;
     } catch (e) {
       setConnectionStatus('disconnected');
-      throw e;
+      throw new Error(bleReason(e));
     }
   };
 
@@ -114,6 +136,7 @@ export function BleProvider({ children }) {
       connectedDevice,
       connectionStatus,
       knownDevices,
+      ensureBleReady,
       connectToDevice,
       forgetDevice,
       disconnect,

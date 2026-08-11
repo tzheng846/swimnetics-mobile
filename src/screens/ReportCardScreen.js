@@ -6,7 +6,8 @@ import {
 } from 'react-native';
 import VelocityChart from '../components/VelocityChart';
 import { supabase } from '../lib/supabase';
-import DataQualityCard from '../components/DataQualityCard';
+import CycleCharts from '../components/CycleCharts';
+import { dropoutWarning } from '../lib/dropoutWarning';
 import PillarCards from '../components/PillarCards';
 import AiBubble from '../components/ai/AiBubble';
 import { useAuth } from '../context/AuthContext';
@@ -92,7 +93,7 @@ export default function ReportCardScreen({ route, navigation }) {
       try {
         const { data, error: err } = await supabase
           .from('sessions')
-          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at')
+          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at, sample_rate_hz')
           .eq('id', sessionId)
           .single();
         if (err) {
@@ -167,13 +168,22 @@ export default function ReportCardScreen({ route, navigation }) {
   const metrics = sessionData.metrics_json ?? {};
   const vel = sessionData.velocity_profile ?? [];
   const dist = sessionData.distance_profile ?? [];
-  const time = Array.from({ length: vel.length }, (_, i) => i / 100);
 
-  // Advanced-only: cycle boundary times (idx/100) for the segmentation overlay on the chart.
+  // The session's TRUE sample rate. run_pipeline decimates by an integer factor, so the requested
+  // 100 Hz is essentially never achieved (~89.5 Hz is typical) — `sessions.sample_rate_hz` is the
+  // authoritative per-session value. NULL means the row predates Phase 52 and has no recorded rate;
+  // 100 reproduces exactly how those rows have always rendered here. Do NOT backfill the column —
+  // that would erase the distinction between "genuinely 100" and "unknown".
+  // Mirrors web/app/app/sessions/[id]/page.js:120, including the `> 0` guard (which also rejects 0).
+  const fsHz = sessionData.sample_rate_hz > 0 ? sessionData.sample_rate_hz : 100;
+  const time = Array.from({ length: vel.length }, (_, i) => i / fsHz);
+
+  // Advanced-only: cycle boundary times for the segmentation overlay on the chart. Cycle bounds are
+  // stored as sample INDICES, so converting them to seconds needs the same rate as `time`.
   const cycleBoundaries = view === 'advanced'
     ? Array.from(new Set(
         (metrics.cycles ?? []).flatMap(c => [c.start_idx, c.end_idx].filter(x => x != null)),
-      )).sort((a, b) => a - b).map(i => i / 100)
+      )).sort((a, b) => a - b).map(i => i / fsHz)
     : [];
 
   const unitFactor = unit === 'imperial' ? 1.09361 : 1;
@@ -182,6 +192,7 @@ export default function ReportCardScreen({ route, navigation }) {
   const fmtDist    = (val) => val != null ? (val * unitFactor).toFixed(1) : null;
   const fmtVel     = (val) => val != null ? (val * unitFactor).toFixed(2) : null;
   const efficiencyUnreliable = (metrics.session?.cv_isi ?? 0) > 0.80;
+  const dropoutMsg = dropoutWarning(metrics.data_quality);
 
   const STROKE_LABELS = {
     breaststroke: 'Breaststroke', freestyle: 'Freestyle',
@@ -216,7 +227,7 @@ export default function ReportCardScreen({ route, navigation }) {
     for (let i = 0; i < vel.length; i++) {
       const v = vel[i] != null ? vel[i].toFixed(6) : '';
       const d = dist[i] != null ? dist[i].toFixed(6) : '';
-      rows.push(`${(i / 100).toFixed(4)},${v},${d},${cycleIds[i]}`);
+      rows.push(`${(i / fsHz).toFixed(4)},${v},${d},${cycleIds[i]}`);
     }
     const csvString = rows.join('\n');
 
@@ -393,27 +404,30 @@ export default function ReportCardScreen({ route, navigation }) {
               </View>
             </View>
 
-            {/* Efficiency */}
+            {/* Efficiency — per-cycle trends (Phase 60 D2). The six scalars these replace are now
+                captions on the charts they summarize; `cv_isi` and `cv_arm_peak_vel` are the
+                DISPERSION of the duration and arm-peak series, not per-cycle quantities, so they
+                caption those two panels rather than getting panels of their own. */}
             <View style={st.sectionCard}>
               <Text style={st.sectionTitle}>Efficiency</Text>
-              {efficiencyUnreliable ? (
+              {/* D10: a high ISI CV no longer BLANKS this section. The charts show exactly the
+                  scatter that made it high, so the warning belongs above them, not instead. */}
+              {efficiencyUnreliable && (
                 <Text style={st.unreliableWarn}>
                   Stroke detection may be unreliable for this session.{'\n'}
                   Check recording conditions or technique consistency.
                 </Text>
-              ) : (
-                <>
-                  <View style={st.metricRow}>
-                    <MetricItem label="Dist/Stroke" value={fmtDist(metrics.session?.mean_dps_m)}    unit={distUnit} />
-                    <MetricItem label="Coast"       value={metrics.session?.mean_coast_fraction != null ? (metrics.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
-                  </View>
-                  <View style={st.metricRow}>
-                    <MetricItem label="ISI CV"      value={metrics.session?.cv_isi != null ? (metrics.session.cv_isi * 100).toFixed(1) : null} unit="%" />
-                    <MetricItem label="Arm Peak CV" value={metrics.session?.cv_arm_peak_vel != null ? (metrics.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
-                    <MetricItem label="Fatigue"     value={metrics.session?.fatigue_index_pct?.toFixed(1)} unit="%" />
-                  </View>
-                </>
               )}
+              <CycleCharts
+                cycles={metrics.cycles}
+                session={metrics.session}
+                unitFactor={unitFactor}
+                distUnit={distUnit}
+                velUnit={velUnit}
+              />
+              <View style={st.metricRow}>
+                <MetricItem label="Fatigue" value={metrics.session?.fatigue_index_pct?.toFixed(1)} unit="%" />
+              </View>
             </View>
           </>
         )}
@@ -488,8 +502,12 @@ export default function ReportCardScreen({ route, navigation }) {
           </View>
         )}
 
-        {/* Data Quality */}
-        <DataQualityCard dataQuality={metrics.data_quality} />
+        {/* Encoder dropout — all that remains of the retired Data Quality card (D3/D9) */}
+        {dropoutMsg && (
+          <View style={st.dropoutStrip}>
+            <Text style={st.dropoutText}>⚠ {dropoutMsg}</Text>
+          </View>
+        )}
 
         {/* Notes */}
         <View style={st.sectionCard}>
@@ -677,4 +695,6 @@ const st = StyleSheet.create({
   notesInput:       { fontSize: 14, color: colors.text, minHeight: 88, paddingTop: 4, lineHeight: 20 },
   compareBtn:       { borderWidth: 1, borderColor: colors.border, borderRadius: 12, paddingVertical: 12, alignItems: 'center', marginBottom: 12 },
   compareBtnText:   { fontSize: 13, fontWeight: '600', color: colors.primary },
+  dropoutStrip:     { backgroundColor: colors.okBg, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 10 },
+  dropoutText:      { fontSize: 12, color: colors.ok, lineHeight: 17 },
 });

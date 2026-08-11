@@ -14,7 +14,7 @@ import { enqueue as enqueueVideoUpload } from '../lib/videoUploadQueue';
 import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
 import { useUnits } from '../context/UnitsContext';
-import DataQualityCard from '../components/DataQualityCard';
+import { dropoutWarning } from '../lib/dropoutWarning';
 import StartSequenceOverlay from '../components/StartSequenceOverlay';
 import useStartSequence from '../hooks/useStartSequence';
 import { parseStatus, magnetVerdict } from '../lib/deviceStatus';
@@ -126,6 +126,7 @@ export default function RecordScreen({ route, navigation }) {
   const fmtDist    = (val) => val != null ? (val * unitFactor).toFixed(1) : null;
   const fmtVel     = (val) => val != null ? (val * unitFactor).toFixed(2) : null;
   const efficiencyUnreliable = (apiResult?.session?.cv_isi ?? 0) > 0.80;
+  const dropoutMsg = dropoutWarning(apiResult?.data_quality);
 
   const log = useCallback((msg, level = 'info') => {
     console.log(`[${level.toUpperCase()}] ${msg}`);
@@ -888,24 +889,23 @@ export default function RecordScreen({ route, navigation }) {
           {/* ── Efficiency ── */}
           <View style={styles.sectionCard}>
             <Text style={styles.sectionTitle}>Efficiency</Text>
-            {efficiencyUnreliable ? (
+            {/* D10: a high ISI CV warns, it no longer BLANKS the section. Matches the report card
+                so the two screens cannot disagree about the same session. */}
+            {efficiencyUnreliable && (
               <Text style={styles.unreliableWarn}>
                 Stroke detection may be unreliable for this session.{'\n'}
                 Check recording conditions or technique consistency.
               </Text>
-            ) : (
-              <>
-                <View style={styles.metricRow}>
-                  <MetricItem label="Dist/Stroke"  value={fmtDist(apiResult.session?.mean_dps_m)}                          unit={distUnit} />
-                  <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
-                </View>
-                <View style={styles.metricRow}>
-                  <MetricItem label="ISI CV"       value={apiResult.session?.cv_isi != null ? (apiResult.session.cv_isi * 100).toFixed(1) : null}             unit="%" />
-                  <MetricItem label="Arm Peak CV"  value={apiResult.session?.cv_arm_peak_vel != null ? (apiResult.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
-                  <MetricItem label="Fatigue"      value={apiResult.session?.fatigue_index_pct?.toFixed(1)}                unit="%" />
-                </View>
-              </>
             )}
+            <View style={styles.metricRow}>
+              <MetricItem label="Dist/Stroke"  value={fmtDist(apiResult.session?.mean_dps_m)}                          unit={distUnit} />
+              <MetricItem label="Coast"        value={apiResult.session?.mean_coast_fraction != null ? (apiResult.session.mean_coast_fraction * 100).toFixed(1) : null} unit="%" />
+            </View>
+            <View style={styles.metricRow}>
+              <MetricItem label="ISI CV"       value={apiResult.session?.cv_isi != null ? (apiResult.session.cv_isi * 100).toFixed(1) : null}             unit="%" />
+              <MetricItem label="Arm Peak CV"  value={apiResult.session?.cv_arm_peak_vel != null ? (apiResult.session.cv_arm_peak_vel * 100).toFixed(1) : null} unit="%" />
+              <MetricItem label="Fatigue"      value={apiResult.session?.fatigue_index_pct?.toFixed(1)}                unit="%" />
+            </View>
           </View>
 
           {/* ── Velocity Chart ── */}
@@ -950,8 +950,12 @@ export default function RecordScreen({ route, navigation }) {
             />
           </View>
 
-          {/* ── Data Quality ── */}
-          <DataQualityCard dataQuality={apiResult.data_quality} />
+          {/* ── Encoder dropout — all that remains of the retired Data Quality card (D3/D9) ── */}
+          {dropoutMsg && (
+            <View style={styles.dropoutStrip}>
+              <Text style={styles.dropoutText}>⚠ {dropoutMsg}</Text>
+            </View>
+          )}
 
           {/* ── Video overlay ── */}
           {videoUri && videoStartPhoneMs != null && sessionStartPhoneMs != null && (
@@ -1160,6 +1164,8 @@ const styles = StyleSheet.create({
   ttxBtnTextActive: { color: colors.white },
   noDetectText:    { fontSize: 13, color: colors.textSecondary, fontStyle: 'italic', marginTop: 2 },
   unreliableWarn:  { fontSize: 13, color: colors.ok, fontStyle: 'italic', lineHeight: 20, paddingVertical: 4 },
+  dropoutStrip:    { backgroundColor: colors.okBg, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 10 },
+  dropoutText:     { fontSize: 12, color: colors.ok, lineHeight: 17 },
   syncLine:     { fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: 10 },
   cameraWrap:   { flex: 1, paddingHorizontal: 20 },
   camera:       { width: '100%', aspectRatio: 3 / 4, borderRadius: 12, overflow: 'hidden' },

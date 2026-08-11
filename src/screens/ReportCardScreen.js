@@ -12,6 +12,7 @@ import PillarCards from '../components/PillarCards';
 import AiBubble from '../components/ai/AiBubble';
 import { useAuth } from '../context/AuthContext';
 import { useUnits } from '../context/UnitsContext';
+import { apiFetch } from '../lib/apiFetch';
 import { API_BASE } from '../config';
 import { colors } from '../theme';
 
@@ -76,6 +77,13 @@ export default function ReportCardScreen({ route, navigation }) {
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [markerLabel, setMarkerLabel] = useState('');
   const [prevSessionId, setPrevSessionId] = useState(null);
+  const [videoLoading, setVideoLoading]   = useState(false);
+  // Last place the user scrubbed to on the chart. Kept separately from the chart's own cursor,
+  // which fades after 2 s — the "Set start" control has to still work after that.
+  const [cursorTimeS, setCursorTimeS] = useState(null);
+  // User-dropped start marker. Overrides the auto-detected baseline for Time to Distance.
+  // Per session and in-memory only: not persisted, not sent to the server.
+  const [startTimeS, setStartTimeS] = useState(null);
   const { unit: unitPref, setUnit: setUnitPref } = useUnits();  // global m/yd pref (Settings)
   const unit = unitPref === 'yd' ? 'imperial' : 'metric';        // local convention kept
   const [view, setView] = useState('simple');   // 'simple' = pillar cards, 'advanced' = raw metrics
@@ -93,7 +101,7 @@ export default function ReportCardScreen({ route, navigation }) {
       try {
         const { data, error: err } = await supabase
           .from('sessions')
-          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at, sample_rate_hz')
+          .select('metrics_json, velocity_profile, distance_profile, name, notes, is_starred, stroke_type, athlete_id, created_at, sample_rate_hz, video_path')
           .eq('id', sessionId)
           .single();
         if (err) {
@@ -254,6 +262,35 @@ export default function ReportCardScreen({ route, navigation }) {
       });
     } catch {
       // non-fatal — optimistic update already applied
+    }
+  }
+
+  // Phase 60 D4 — open the session's video from ANY saved session, not just the just-recorded
+  // state. The signed URL expires after an hour, so it is fetched on tap and never at page load.
+  // GET /sessions/{id}/video-url returns {url, origin_s} in one round trip.
+  async function openVideoOverlay() {
+    if (videoLoading) return;                 // guard a double tap
+    setVideoLoading(true);
+    try {
+      const { url, origin_s } = await apiFetch(`/sessions/${sessionId}/video-url`, {
+        token: authSession?.access_token,
+      });
+      navigation.navigate('VideoOverlay', {
+        time,
+        velocity: vel,
+        videoUri: url,
+        sessionId,
+        storedOriginS: origin_s ?? null,
+      });
+    } catch (e) {
+      const msg = e?.status === 404
+        ? 'This session has no video attached.'
+        : e?.status === 503
+          ? "Video storage isn't configured."
+          : e?.message || 'Could not load the video. Check your connection and try again.';
+      Alert.alert('Video unavailable', msg);
+    } finally {
+      setVideoLoading(false);
     }
   }
 
@@ -452,6 +489,22 @@ export default function ReportCardScreen({ route, navigation }) {
           </TouchableOpacity>
         )}
 
+        {/* Video + velocity — only when this session actually has footage (D4) */}
+        {sessionData.video_path && (
+          <TouchableOpacity
+            style={st.compareBtn}
+            onPress={openVideoOverlay}
+            disabled={videoLoading}
+            accessibilityLabel="Open video with velocity trace"
+          >
+            {videoLoading ? (
+              <ActivityIndicator color={colors.primary} />
+            ) : (
+              <Text style={st.compareBtnText}>▶ Video + Velocity</Text>
+            )}
+          </TouchableOpacity>
+        )}
+
         {/* Velocity Chart */}
         <View style={st.chartHeader}>
           <Text style={st.chartTitle}>Velocity</Text>
@@ -480,6 +533,8 @@ export default function ReportCardScreen({ route, navigation }) {
           interactive
           brush
           cycleBoundaries={cycleBoundaries}
+          onCursorChange={setCursorTimeS}
+          startMarkerTimeS={startTimeS}
           onInteractionStart={() => setScrollEnabled(false)}
           onInteractionEnd={() => setScrollEnabled(true)}
         />
@@ -495,11 +550,42 @@ export default function ReportCardScreen({ route, navigation }) {
             <TimeToX
               timeArr={time}
               distArr={dist}
-              baselineEndS={metrics.session?.baseline_end_s}
+              baselineEndS={startTimeS ?? metrics.session?.baseline_end_s}
               headWaistM={headWaistM}
               onMarkerChange={(tS, lbl) => { setMarkerTimeS(tS); setMarkerLabel(lbl); }}
               unit={unit}
             />
+
+            {/* Start marker. `baseline_end_s` is auto-detected and the coach may not trust it, so
+                scrub the chart above and drop a start here; everything below re-measures from it. */}
+            <View style={st.startBlock}>
+              <Text style={st.startState}>
+                Measuring from{' '}
+                <Text style={st.startStateValue}>
+                  {startTimeS != null
+                    ? `${startTimeS.toFixed(2)} s`
+                    : metrics.session?.baseline_end_s != null
+                      ? `${metrics.session.baseline_end_s.toFixed(2)} s`
+                      : '--'}
+                </Text>
+                {startTimeS != null ? ' — your marker' : ' — auto-detected'}
+              </Text>
+              <View style={st.startBtnRow}>
+                {cursorTimeS != null && cursorTimeS !== startTimeS && (
+                  <TouchableOpacity style={st.startBtn} onPress={() => setStartTimeS(cursorTimeS)}>
+                    <Text style={st.startBtnText}>Start at {cursorTimeS.toFixed(2)} s</Text>
+                  </TouchableOpacity>
+                )}
+                {startTimeS != null && (
+                  <TouchableOpacity style={st.startBtn} onPress={() => setStartTimeS(null)}>
+                    <Text style={st.startBtnText}>Use auto</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+              {cursorTimeS == null && startTimeS == null && (
+                <Text style={st.startHint}>Drag across the velocity chart to pick a start point.</Text>
+              )}
+            </View>
           </View>
         )}
 
@@ -698,4 +784,11 @@ const st = StyleSheet.create({
   compareBtnText:   { fontSize: 13, fontWeight: '600', color: colors.primary },
   dropoutStrip:     { backgroundColor: colors.okBg, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 10 },
   dropoutText:      { fontSize: 12, color: colors.ok, lineHeight: 17 },
+  startBlock:       { borderTopWidth: 1, borderTopColor: colors.border, marginTop: 14, paddingTop: 10, alignItems: 'center' },
+  startState:       { fontSize: 12, color: colors.textSecondary },
+  startStateValue:  { fontWeight: '700', color: colors.text },
+  startBtnRow:      { flexDirection: 'row', gap: 8, marginTop: 8 },
+  startBtn:         { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, borderWidth: 1, borderColor: colors.good },
+  startBtnText:     { fontSize: 12, fontWeight: '600', color: colors.good },
+  startHint:        { fontSize: 11, color: colors.textMuted, fontStyle: 'italic', marginTop: 6, textAlign: 'center' },
 });

@@ -111,8 +111,19 @@ export function resampleWindow(time, velocity, tStart, tEnd, maxPoints = 400) {
   const stride = Math.max(1, Math.ceil(count / Math.max(1, maxPoints)));
 
   const ok = (i) => velocity[i] != null && !isNaN(velocity[i]);
-  for (let i = lo; i <= hi; i += stride) if (ok(i)) out.push(i);
-  if (out.length > 0 && out[out.length - 1] !== hi && ok(hi)) out.push(hi);
+
+  // ⚠ The lattice is anchored to ABSOLUTE index 0, not to `lo`. Anchoring it to `lo` makes the
+  // sampled set slide with the window, so on a rolling window consecutive frames draw DIFFERENT
+  // neighbouring samples and the polyline shimmers against itself. Measured at span 5 s: two
+  // lattice phases alternating frame to frame. With a fixed lattice the window slide only adds and
+  // removes points at the edges, and the interior is pixel-stable.
+  const first = Math.ceil(lo / stride) * stride;
+  for (let i = first; i <= hi; i += stride) if (ok(i)) out.push(i);
+
+  // Reach the right edge only when nothing is being skipped anyway. At stride > 1 this vertex
+  // would move every frame — the exact jitter the lattice exists to remove — and the gap it closes
+  // is at most one stride, which is sub-pixel.
+  if (stride === 1 && out.length > 0 && out[out.length - 1] !== hi && ok(hi)) out.push(hi);
   return out;
 }
 

@@ -1,9 +1,10 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, TouchableOpacity, SafeAreaView, StyleSheet,
 } from 'react-native';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import VelocityChart from '../components/VelocityChart';
+import { clampWindow } from '../lib/chartWindow';
 import { API_BASE } from '../config';
 import { supabase } from '../lib/supabase';
 import { colors } from '../theme';
@@ -32,6 +33,18 @@ export function interpVelocity(time, velocity, t) {
 const NUDGE_LIMIT_S = 3;
 const NUDGE_STEPS = [-0.5, -0.1, 0.1, 0.5];
 
+// Phase 60 D5 — how much of the trace to show around the playhead. `null` = the whole thing,
+// which is exactly the pre-60-03 behaviour. Presets rather than a slider: React Native dropped its
+// built-in Slider at 0.60, so a continuous control means @react-native-community/slider — a native
+// module, and therefore a fresh EAS build just to evaluate it.
+const SPAN_PRESETS = [
+  { label: '1s', span: 1 },
+  { label: '2s', span: 2 },
+  { label: '5s', span: 5 },
+  { label: 'All', span: null },
+];
+const DEFAULT_SPAN_S = 2;
+
 // ── Screen ─────────────────────────────────────────────────────────────────────
 // Synced playback: tether_t = video currentTime + video_origin_s + manualOffsetS.
 // END-ANCHOR: the camera and the device stop on the same tap, so their END phone times
@@ -39,7 +52,10 @@ const NUDGE_STEPS = [-0.5, -0.1, 0.1, 0.5];
 // device timeline. This is warm-up-agnostic — unlike the old anchor (videoStartPhoneMs was
 // stamped at the recordAsync() call, ~camera-warm-up before the first frame → ~2 s off).
 export default function VideoOverlayScreen({ route, navigation }) {
-  const { time, velocity, videoUri, sessionId } = route?.params ?? {};
+  // `videoUri` is a local file:// path when we arrive from the record screen and a signed https
+  // URL when we arrive from the report card (Phase 60 D4) — expo-video takes either.
+  // `storedOriginS` is sessions.video_origin_s when the caller already knows it; null otherwise.
+  const { time, velocity, videoUri, sessionId, storedOriginS = null } = route?.params ?? {};
 
   // Velocity arrays live in a ref — they never change and must not re-enter
   // effect deps at the ~20 Hz marker update rate.
@@ -49,11 +65,32 @@ export default function VideoOverlayScreen({ route, navigation }) {
   const deviceDurationS = time?.length ? time[time.length - 1] - time[0] : 0;
   // Video duration (s) — read from the player once it loads its metadata (async).
   const [videoDurationS, setVideoDurationS] = useState(null);
-  // Origin is null until the video duration is known (marker stays inert rather than guessing).
-  const videoOriginS = videoDurationS != null ? deviceDurationS - videoDurationS : null;
+  // Null until the video duration is known (marker stays inert rather than guessing).
+  const endAnchoredOriginS = videoDurationS != null ? deviceDurationS - videoDurationS : null;
+
+  // ONE RULE, both entry points (Phase 60 D11, amended): use the stored origin if there is one,
+  // otherwise compute it. There is deliberately no "which screen am I" flag — the record screen
+  // never has a stored origin, so it computes and saves exactly as it always did, and the report
+  // card usually does, so it reuses it instead of clobbering a nudge someone already dialled in.
+  const effectiveOriginS = storedOriginS != null ? storedOriginS : endAnchoredOriginS;
   const [manualOffsetS, setManualOffsetS] = useState(0);
   const [markerTimeS, setMarkerTimeS] = useState(null);
   const [readoutVel, setReadoutVel] = useState(null);
+  const [spanS, setSpanS] = useState(DEFAULT_SPAN_S);
+
+  // Rolling window, CENTRED on the playhead — the coach needs the approach and the follow-through,
+  // not only what has already happened. clampWindow's 'span' anchor gives the end behaviour for
+  // free: near t=0 this becomes [0, span] rather than [-1, +1], preserving width instead of
+  // shrinking. No new timer — the 20 Hz poll below already produces markerTimeS.
+  const chartWindow = useMemo(() => {
+    if (spanS == null || markerTimeS == null) return null;
+    const t = dataRef.current.time;
+    if (!t?.length) return null;
+    return clampWindow(
+      { tStart: markerTimeS - spanS / 2, tEnd: markerTimeS + spanS / 2 },
+      t[0], t[t.length - 1], 'span',
+    );
+  }, [spanS, markerTimeS]);
 
   const player = useVideoPlayer(videoUri, (p) => {
     p.loop = false;
@@ -76,13 +113,13 @@ export default function VideoOverlayScreen({ route, navigation }) {
       if (dur != null && !isNaN(dur) && dur > 0) {
         setVideoDurationS(prev => (prev === dur ? prev : dur));
       }
-      if (t == null || isNaN(t) || videoOriginS == null) return; // wait for duration → origin
-      const tetherT = t + videoOriginS + manualOffsetS;
+      if (t == null || isNaN(t) || effectiveOriginS == null) return; // wait for an origin
+      const tetherT = t + effectiveOriginS + manualOffsetS;
       setMarkerTimeS(prev => (prev === tetherT ? prev : tetherT));
       setReadoutVel(interpVelocity(dataRef.current.time, dataRef.current.velocity, tetherT));
     }, 50);
     return () => clearInterval(id);
-  }, [player, videoOriginS, manualOffsetS]);
+  }, [player, effectiveOriginS, manualOffsetS]);
 
   const nudge = (step) => {
     setManualOffsetS(o => Math.max(-NUDGE_LIMIT_S, Math.min(NUDGE_LIMIT_S, +(o + step).toFixed(1))));
@@ -95,6 +132,10 @@ export default function VideoOverlayScreen({ route, navigation }) {
   const [syncSaveState, setSyncSaveState] = useState(null); // 'saved' | 'failed' | null
   const originSavedOnceRef = useRef(false);
   const originDebounceRef = useRef(null);
+  // Skips the initial [manualOffsetS] run. This used to be done by testing originSavedOnceRef,
+  // which coupled "the user nudged" to "the auto-post already ran" — so on any path that skips the
+  // auto-post, the first nudge would have been silently swallowed.
+  const nudgeMountRef = useRef(true);
 
   const saveOrigin = useCallback(async (v) => {
     if (!sessionId) return;
@@ -116,19 +157,27 @@ export default function VideoOverlayScreen({ route, navigation }) {
     }
   }, [sessionId]);
 
-  // Post once as soon as the end-anchored origin is known.
+  // Auto-post, once, ONLY when nothing is stored yet.
+  // ⚠ NEVER OVERWRITE AN EXISTING ORIGIN. A stored value may already carry a nudge someone dialled
+  // in; recomputing over it would silently replace good data with worse — the failure shape Phases
+  // 51/52/57/58 each turned up. When it IS null the session is the background-upload case (the
+  // queue posts the file and no origin), which reaches the web at origin 0, silently unsynced —
+  // there is nothing to destroy, so writing can only help.
   useEffect(() => {
-    if (videoOriginS == null || !sessionId || originSavedOnceRef.current) return;
+    if (storedOriginS != null) return;
+    if (endAnchoredOriginS == null || !sessionId || originSavedOnceRef.current) return;
     originSavedOnceRef.current = true;
-    saveOrigin(videoOriginS + manualOffsetS);
+    saveOrigin(endAnchoredOriginS + manualOffsetS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoOriginS, sessionId, saveOrigin]);
+  }, [endAnchoredOriginS, storedOriginS, sessionId, saveOrigin]);
 
-  // Re-post (debounced) when the user nudges the sync offset.
+  // Re-post (debounced) when the user nudges. This fires on EVERY path — a nudge is deliberate,
+  // and it is the only way to repair a bad stored origin from the phone.
   useEffect(() => {
-    if (!originSavedOnceRef.current || videoOriginS == null || !sessionId) return;
+    if (nudgeMountRef.current) { nudgeMountRef.current = false; return; }
+    if (effectiveOriginS == null || !sessionId) return;
     clearTimeout(originDebounceRef.current);
-    originDebounceRef.current = setTimeout(() => saveOrigin(videoOriginS + manualOffsetS), 1000);
+    originDebounceRef.current = setTimeout(() => saveOrigin(effectiveOriginS + manualOffsetS), 1000);
     return () => clearTimeout(originDebounceRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manualOffsetS]);
@@ -172,26 +221,58 @@ export default function VideoOverlayScreen({ route, navigation }) {
           velocity={dataRef.current.velocity}
           markerTimeS={markerTimeS}
           markerLabel=""
+          window={chartWindow}
         />
       </View>
 
-      {/* Sync nudge — corrects the small fixed camera warm-up latency */}
-      <View style={styles.nudgeRow}>
-        {NUDGE_STEPS.map(step => (
-          <TouchableOpacity key={step} style={styles.nudgeBtn} onPress={() => nudge(step)}>
-            <Text style={styles.nudgeBtnText}>{step > 0 ? `+${step}` : step}s</Text>
-          </TouchableOpacity>
-        ))}
+      {/* Two rows of near-identical pills sat unlabelled next to each other and read as one
+          control. They do completely different things: WINDOW changes how much trace you see,
+          SYNC moves the video against the trace. Each row now says which it is. */}
+
+      {/* How much of the trace is visible. `All` passes window=null — exactly the pre-60-03 view. */}
+      <View style={styles.ctrlRow}>
+        <Text style={styles.ctrlLabel}>WINDOW</Text>
+        <View style={styles.ctrlBtns}>
+          {SPAN_PRESETS.map(p => {
+            const on = spanS === p.span;
+            return (
+              <TouchableOpacity
+                key={p.label}
+                style={[styles.spanBtn, on && styles.spanBtnOn]}
+                onPress={() => setSpanS(p.span)}
+              >
+                <Text style={[styles.spanBtnText, on && styles.spanBtnTextOn]}>{p.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+      </View>
+
+      {/* Where the video sits against the trace — corrects residual camera warm-up latency. */}
+      <View style={styles.ctrlRow}>
+        <Text style={styles.ctrlLabel}>SYNC</Text>
+        <View style={styles.ctrlBtns}>
+          {NUDGE_STEPS.map(step => (
+            <TouchableOpacity key={step} style={styles.nudgeBtn} onPress={() => nudge(step)}>
+              <Text style={styles.nudgeBtnText}>{step > 0 ? `+${step}` : step}s</Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
       <Text style={styles.nudgeLabel}>
-        Sync offset: {manualOffsetS >= 0 ? '+' : ''}{manualOffsetS.toFixed(1)} s
+        Video shifted {manualOffsetS >= 0 ? '+' : ''}{manualOffsetS.toFixed(1)} s against the trace
       </Text>
-      {/* Sync debug — origin = deviceDuration − videoDuration (end-anchored). If the overlay
-          is consistently off by a fixed amount, this is the number to report */}
+      {/* Sync debug. Now names WHICH origin is in effect — with two possible sources (stored vs
+          end-anchored recompute) a systematic offset is only diagnosable if you know which one
+          produced it. If the overlay is consistently off by a fixed amount, report this line. */}
       <Text style={styles.debugLine}>
-        origin {videoOriginS != null ? `${videoOriginS >= 0 ? '+' : ''}${videoOriginS.toFixed(2)} s` : '— (loading)'}
+        origin {effectiveOriginS != null ? `${effectiveOriginS >= 0 ? '+' : ''}${effectiveOriginS.toFixed(2)} s` : '— (loading)'}
+        {' '}({storedOriginS != null ? 'stored' : 'computed'})
         {'  ·  '}device {deviceDurationS.toFixed(1)} s
         {'  ·  '}video {videoDurationS != null ? videoDurationS.toFixed(1) : '—'} s
+        {storedOriginS != null && endAnchoredOriginS != null
+          ? `  ·  end-anchor would be ${endAnchoredOriginS >= 0 ? '+' : ''}${endAnchoredOriginS.toFixed(2)} s`
+          : ''}
         {syncSaveState === 'saved' ? '  ·  sync saved ✓' : syncSaveState === 'failed' ? '  ·  sync save failed' : ''}
       </Text>
     </SafeAreaView>
@@ -213,10 +294,19 @@ const styles = StyleSheet.create({
   readoutValue: { fontSize: 36, fontWeight: '700', color: colors.text },
   readoutUnit:  { fontSize: 14, color: colors.textMuted, marginLeft: 6 },
   chartWrap:    { paddingHorizontal: 24, marginTop: 4 },
-  nudgeRow:     { flexDirection: 'row', justifyContent: 'center', gap: 10, marginTop: 8 },
-  nudgeBtn:     { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
-  nudgeBtnText: { fontSize: 14, fontWeight: '600', color: colors.text },
-  nudgeLabel:   { fontSize: 12, color: colors.textSecondary, textAlign: 'center', marginTop: 6 },
+  // One labelled row per control: a fixed-width caption on the left, pills flushed right. Costs no
+  // vertical space (the video is flex:1 and would give it up), and makes the two rows read as two
+  // controls rather than one long strip of pills.
+  ctrlRow:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, marginTop: 8 },
+  ctrlLabel:    { width: 58, fontSize: 10, fontWeight: '700', letterSpacing: 0.8, color: colors.textSecondary },
+  ctrlBtns:     { flex: 1, flexDirection: 'row', justifyContent: 'flex-end', gap: 6 },
+  spanBtn:      { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  spanBtnOn:    { backgroundColor: colors.primary, borderColor: colors.primary },
+  spanBtnText:  { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
+  spanBtnTextOn:{ color: colors.white },
+  nudgeBtn:     { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, backgroundColor: colors.surfaceAlt, borderWidth: 1, borderColor: colors.border },
+  nudgeBtnText: { fontSize: 13, fontWeight: '600', color: colors.text },
+  nudgeLabel:   { fontSize: 11, color: colors.textMuted, textAlign: 'center', marginTop: 6 },
   debugLine:    { fontSize: 10, color: colors.textMuted, textAlign: 'center', marginTop: 4 },
   statusText:   { fontSize: 15, color: colors.text, marginTop: 24, textAlign: 'center' },
   primaryBtn:   { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 36, marginTop: 12, alignSelf: 'center' },

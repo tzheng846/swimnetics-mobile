@@ -8,8 +8,8 @@ import {
 
 // Theme-aware colors: `dark` for the immersive active-recording screen, light for ReportCard.
 const CHART_COLORS = {
-  light: { grid: colors.border, line: colors.primary, marker: colors.periwinkle, cursor: colors.primary, tooltipBg: colors.text, tooltipText: colors.white, axis: colors.textMuted, cycle: colors.periwinkle, brushBg: colors.surfaceAlt, brushLine: colors.textMuted, brushMask: 'rgba(155,139,166,0.28)', handle: colors.primary },
-  dark:  { grid: 'rgba(255,255,255,0.18)', line: colors.accent, marker: colors.accent, cursor: colors.accent, tooltipBg: colors.surface, tooltipText: colors.text, axis: 'rgba(255,255,255,0.6)', cycle: 'rgba(255,255,255,0.35)', brushBg: 'rgba(255,255,255,0.06)', brushLine: 'rgba(255,255,255,0.45)', brushMask: 'rgba(0,0,0,0.42)', handle: colors.accent },
+  light: { grid: colors.border, line: colors.primary, marker: colors.periwinkle, cursor: colors.primary, tooltipBg: colors.text, tooltipText: colors.white, axis: colors.textMuted, cycle: colors.periwinkle, brushBg: colors.surfaceAlt, brushLine: colors.textMuted, brushMask: 'rgba(155,139,166,0.28)', handle: colors.primary, start: colors.good },
+  dark:  { grid: 'rgba(255,255,255,0.18)', line: colors.accent, marker: colors.accent, cursor: colors.accent, tooltipBg: colors.surface, tooltipText: colors.text, axis: 'rgba(255,255,255,0.6)', cycle: 'rgba(255,255,255,0.35)', brushBg: 'rgba(255,255,255,0.06)', brushLine: 'rgba(255,255,255,0.45)', brushMask: 'rgba(0,0,0,0.42)', handle: colors.accent, start: '#7ee2a8' },
 };
 
 const MAX_POINTS = 400;
@@ -42,6 +42,12 @@ export default function VelocityChart({
   // Render the draggable window strip below the chart.
   brush = false,
   onWindowChange = null,
+  // Fires with the scrub cursor's time on every drag. The parent keeps its own copy, which
+  // deliberately OUTLIVES the cursor's 2-second visual fade — otherwise a "use where I scrubbed to"
+  // control would go dead before the user could reach it.
+  onCursorChange = null,
+  // A user-dropped start marker, drawn distinctly from `markerTimeS` (which is computed).
+  startMarkerTimeS = null,
 }) {
   const C = dark ? CHART_COLORS.dark : CHART_COLORS.light;
   const W = Dimensions.get('window').width - 48;
@@ -61,6 +67,7 @@ export default function VelocityChart({
   const onInteractionStartRef = React.useRef(onInteractionStart);
   const onInteractionEndRef   = React.useRef(onInteractionEnd);
   const onWindowChangeRef     = React.useRef(onWindowChange);
+  const onCursorChangeRef     = React.useRef(onCursorChange);
 
   // Chart-body responder: single-finger drag shows the velocity cursor. That is its ONLY job now
   // that pinch and pan-when-zoomed are gone.
@@ -166,6 +173,7 @@ export default function VelocityChart({
   onInteractionStartRef.current = onInteractionStart;
   onInteractionEndRef.current   = onInteractionEnd;
   onWindowChangeRef.current     = onWindowChange;
+  onCursorChangeRef.current     = onCursorChange;
   activeWinRef.current          = activeWindow;
   if (full) traceRef.current    = { tMin: full.range.tStart, tMax: full.range.tEnd };
 
@@ -209,6 +217,7 @@ export default function VelocityChart({
       0,
     );
     setCursor({ timeS: ct[nearestIdx], vel: cv[nearestIdx] });
+    onCursorChangeRef.current?.(ct[nearestIdx]);
   };
 
   // Brush handler: hit-test once on grant, then resize or pan for the rest of the drag.
@@ -262,6 +271,17 @@ export default function VelocityChart({
         ),
       )}
       <Polyline points={points} fill="none" stroke={C.line} strokeWidth={1.5} />
+      {startMarkerTimeS != null && startMarkerTimeS >= tMin && startMarkerTimeS <= tMax && (
+        <>
+          <Line
+            x1={px(startMarkerTimeS)} y1={0} x2={px(startMarkerTimeS)} y2={H}
+            stroke={C.start} strokeWidth={2}
+          />
+          <SvgText x={px(startMarkerTimeS) + 3} y={H - 2} fontSize={9} fontWeight="bold" fill={C.start}>
+            START
+          </SvgText>
+        </>
+      )}
       {showMarker && (
         <>
           <Line x1={markerX} y1={0} x2={markerX} y2={H} stroke={C.marker} strokeWidth={1.5} />

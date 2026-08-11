@@ -57,6 +57,8 @@
 	<string>Swimnetics records swim video to overlay velocity data for playback analysis.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Swim videos are recorded with audio.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Swim videos are saved to your photo library so you can review the footage after recording.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleIconName</key>

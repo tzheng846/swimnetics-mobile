@@ -204,7 +204,11 @@ const styles = StyleSheet.create({
   header:       { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 16, marginBottom: 8 },
   title:        { fontSize: 18, fontWeight: '700', color: colors.text },
   backText:     { fontSize: 14, color: colors.primary },
-  video:        { width: '100%', aspectRatio: 3 / 4, backgroundColor: '#000' },
+  // Height-driven, not aspect-driven. The footage is portrait (9:16), so a width-locked box
+  // would be ~693pt tall on a 390pt screen and bury the chart. flex:1 hands the video whatever
+  // the fixed rows below it (readout, 170pt chart, nudge, sync labels) do not use, and
+  // contentFit="contain" pillarboxes inside that — so it adapts to any screen or clip shape.
+  video:        { flex: 1, width: '100%', backgroundColor: '#000' },
   readoutRow:   { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'center', marginTop: 8 },
   readoutValue: { fontSize: 36, fontWeight: '700', color: colors.text },
   readoutUnit:  { fontSize: 14, color: colors.textMuted, marginLeft: 6 },

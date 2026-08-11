@@ -10,6 +10,7 @@ import Button from '../components/ui/Button';
 import { supabase } from '../lib/supabase';
 import { useBle } from '../context/BleContext';
 import { getStartSequenceEnabled, setStartSequenceEnabled } from '../lib/startSequencePrefs';
+import { getAutoStopS, setAutoStopS, DEFAULT_AUTO_STOP_S } from '../lib/autoStopPrefs';
 import { colors, spacing, radii } from '../theme';
 
 const STROKES = [
@@ -37,6 +38,10 @@ export default function RecordingConfigScreen({ route, navigation }) {
   const [sessionNotes, setSessionNotes] = useState('');
   const [connectingId, setConnectingId] = useState(null);
   const [startSequence, setStartSequence] = useState(true);
+  // Auto-stop: 0 = off. `autoStopText` is the raw field content so a mid-typing empty field
+  // does not read as 0 and silently switch the feature off.
+  const [autoStopS, setAutoStopSState] = useState(DEFAULT_AUTO_STOP_S);
+  const [autoStopText, setAutoStopText] = useState(String(DEFAULT_AUTO_STOP_S));
 
   const isConnected = connectionStatus === 'connected';
 
@@ -64,13 +69,41 @@ export default function RecordingConfigScreen({ route, navigation }) {
     navigation.setParams({ athleteId: undefined, athleteName: undefined, defaultStrokeType: undefined });
   }, [athleteId, athletes]);
 
+  // Mount-only is correct for these two: they are prefs changed only on this screen, so local
+  // state stays authoritative. (Unlike the roster above, which needed useFocusEffect.)
   useEffect(() => {
     getStartSequenceEnabled().then(setStartSequence);
+    getAutoStopS().then(s => {
+      setAutoStopSState(s);
+      if (s > 0) setAutoStopText(String(s));
+    });
   }, []);
 
   const toggleStartSequence = (v) => {
     setStartSequence(v);
     setStartSequenceEnabled(v);
+  };
+
+  // Off writes 0; on restores the last typed value, or the default if that is unusable.
+  const toggleAutoStop = (on) => {
+    const next = on ? (parseInt(autoStopText, 10) || DEFAULT_AUTO_STOP_S) : 0;
+    setAutoStopSState(next);
+    if (on) setAutoStopText(String(next));
+    setAutoStopS(next);
+  };
+
+  // Commit on blur, not on keystroke — "2" is a legal prefix of "20" and would otherwise be
+  // clamped up to the 5 s floor mid-typing.
+  const commitAutoStopText = () => {
+    const parsed = parseInt(autoStopText, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setAutoStopText(autoStopS > 0 ? String(autoStopS) : String(DEFAULT_AUTO_STOP_S));
+      return;
+    }
+    setAutoStopS(parsed).then(clamped => {
+      setAutoStopSState(clamped);
+      setAutoStopText(String(clamped));
+    });
   };
 
   const handleConnect = async (bleId) => {
@@ -103,6 +136,7 @@ export default function RecordingConfigScreen({ route, navigation }) {
       sessionName: sessionName.trim() || null,
       sessionNotes: sessionNotes.trim() || null,
       startSequence,
+      autoStopS,
     });
   };
 
@@ -214,6 +248,43 @@ export default function RecordingConfigScreen({ route, navigation }) {
             <Switch
               value={startSequence}
               onValueChange={toggleStartSequence}
+              trackColor={{ true: colors.primary, false: colors.border }}
+            />
+          </View>
+
+          {/* Auto-stop — lets one person record alone instead of swimming back to tap Stop */}
+          <View style={st.toggleRow}>
+            <View style={{ flex: 1, paddingRight: spacing.md }}>
+              <AppText variant="body" color="text">Auto-stop</AppText>
+              <AppText variant="caption" color="textMuted">
+                Stops the device (and camera) this many seconds after the start signal
+              </AppText>
+            </View>
+            {autoStopS > 0 && (
+              <TextInput
+                value={autoStopText}
+                onChangeText={setAutoStopText}
+                onBlur={commitAutoStopText}
+                onSubmitEditing={commitAutoStopText}
+                keyboardType="number-pad"
+                returnKeyType="done"
+                maxLength={3}
+                selectTextOnFocus
+                style={{
+                  width: 52,
+                  marginRight: spacing.sm,
+                  paddingVertical: spacing.xs,
+                  borderRadius: radii.sm,
+                  borderWidth: 1,
+                  borderColor: colors.border,
+                  color: colors.text,
+                  textAlign: 'center',
+                }}
+              />
+            )}
+            <Switch
+              value={autoStopS > 0}
+              onValueChange={toggleAutoStop}
               trackColor={{ true: colors.primary, false: colors.border }}
             />
           </View>

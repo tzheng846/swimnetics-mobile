@@ -7,6 +7,7 @@ import {
 import * as FileSystem from 'expo-file-system/legacy';
 import { Buffer } from 'buffer';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
+import * as MediaLibrary from 'expo-media-library';
 import VelocityChart from '../components/VelocityChart';
 import { API_BASE } from '../config';
 import { enqueue as enqueueVideoUpload } from '../lib/videoUploadQueue';
@@ -60,7 +61,9 @@ function parsePacket(base64) {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 export default function RecordScreen({ route, navigation }) {
-  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null, startSequence = true } = route?.params ?? {};
+  // autoStopS defaults to 0 (disabled) so any caller that omits it — including a stale params
+  // object on RecordingConfig, which is a tab screen that never unmounts — behaves as before.
+  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null, startSequence = true, autoStopS = 0 } = route?.params ?? {};
   useEffect(() => { navigation.setOptions({ gestureEnabled: false }); }, []);
 
   // Race-start cue (3-2-1 → "take your marks" → random hold → blare). Gates START.
@@ -94,6 +97,7 @@ export default function RecordScreen({ route, navigation }) {
   const videoOrchestratedRef  = useRef(false); // onCameraReady can re-fire on remount
   const stopRequestedRef      = useRef(false); // stop tapped before recordAsync started
   const stopVideoRef          = useRef(null);  // lets onCameraReady auto-stop without a dep cycle
+  const stopPlainRef          = useRef(null);  // same, for the plain path's auto-stop deadline
 
   // On-screen error detail — console.log is invisible in a TestFlight build,
   // so failures must surface in the UI to be debuggable at the pool.
@@ -106,6 +110,8 @@ export default function RecordScreen({ route, navigation }) {
   const metaSeenRef     = useRef(false);
   const dumpDoneRef     = useRef(false);
   const elapsedTimerRef = useRef(null);
+  // Auto-stop deadline. Armed where the elapsed tick starts, cleared everywhere it is cleared.
+  const autoStopTimerRef = useRef(null);
   const bleStateRef     = useRef('ready');
   useEffect(() => { bleStateRef.current = bleState; }, [bleState]);
 
@@ -131,6 +137,7 @@ export default function RecordScreen({ route, navigation }) {
       subscriptionRef.current?.remove();
       clearTimeout(stallTimerRef.current);
       clearInterval(elapsedTimerRef.current);
+      clearTimeout(autoStopTimerRef.current);
       // Release the camera if the user navigates away mid-recording. The device
       // keeps buffering on its own (retrievable later); the video file is lost.
       try { cameraRef.current?.stopRecording(); } catch {}
@@ -149,6 +156,7 @@ export default function RecordScreen({ route, navigation }) {
       subscriptionRef.current = null;
       clearTimeout(stallTimerRef.current);
       clearInterval(elapsedTimerRef.current);
+      clearTimeout(autoStopTimerRef.current);
       log('Device disconnected mid-flow — session is retained on the device', 'warn');
       setErrorMsg('Device disconnected. The session is retained on the device — reconnect and tap Retrieve from Device.');
       setBleState('error');
@@ -434,12 +442,20 @@ export default function RecordScreen({ route, navigation }) {
       const t0 = Date.now();
       elapsedTimerRef.current = setInterval(
         () => setElapsedS(Math.floor((Date.now() - t0) / 1000)), 1000);
+      // Armed here, not in beginPlain: the race sequence's hold is deliberately random, so
+      // arming before it would fold an unknown delay into the deadline and the countdown.
+      if (autoStopS > 0) {
+        autoStopTimerRef.current = setTimeout(() => {
+          log(`Auto-stop after ${autoStopS}s`, 'ok');
+          stopPlainRef.current?.();
+        }, autoStopS * 1000);
+      }
       setBleState('recording');
     } catch (e) {
       log(`START failed: ${e.message}`, 'error');
       Alert.alert('Start Failed', e.message ?? 'Could not start recording.');
     }
-  }, [log, writeCmd]);
+  }, [log, writeCmd, autoStopS]);
 
   // Plain-record entry: guard connection + encoder, run the race-start cue (if enabled),
   // then START on the blare.
@@ -459,6 +475,7 @@ export default function RecordScreen({ route, navigation }) {
     if (isStoppingRef.current) { log('stopRecording called twice — ignoring', 'warn'); return; }
     isStoppingRef.current = true;
     clearInterval(elapsedTimerRef.current);
+    clearTimeout(autoStopTimerRef.current);
     try {
       await writeCmd('STOP');
       log('STOP sent', 'ok');
@@ -467,6 +484,25 @@ export default function RecordScreen({ route, navigation }) {
     }
     runRetrieval(); // device holds the buffer — retrieve it now
   }, [log, writeCmd, runRetrieval]);
+  stopPlainRef.current = stopRecording; // keep the auto-stop deadline current
+
+  // Write-only photo access (requestPermissionsAsync(true)) — the app only ever adds, never
+  // reads the library, so this asks for the narrower grant and needs no
+  // NSPhotoLibraryUsageDescription. Every failure path is swallowed: a denied library
+  // permission must never cost the user their session.
+  const saveVideoToLibrary = useCallback(async (uri) => {
+    try {
+      const perm = await MediaLibrary.requestPermissionsAsync(true);
+      if (!perm.granted) {
+        log('Photo library access denied — video not copied to Photos', 'warn');
+        return;
+      }
+      await MediaLibrary.saveToLibraryAsync(uri);
+      log('Video copied to Photos', 'ok');
+    } catch (e) {
+      log(`Could not copy video to Photos (non-fatal): ${e.message}`, 'warn');
+    }
+  }, [log]);
 
   // ── Record with Video (one tap: device START + in-app camera together) ───────
   // The app times its own camera, so videoStartPhoneMs is exact phone wall-clock.
@@ -543,6 +579,14 @@ export default function RecordScreen({ route, navigation }) {
     setElapsedS(0);
     elapsedTimerRef.current = setInterval(
       () => setElapsedS(Math.floor((Date.now() - startMs) / 1000)), 1000);
+    // One timer stops BOTH the camera and the device, which is exactly the premise the
+    // end-anchored sync origin (deviceDuration − videoDuration) rests on.
+    if (autoStopS > 0) {
+      autoStopTimerRef.current = setTimeout(() => {
+        log(`Auto-stop after ${autoStopS}s`, 'ok');
+        stopVideoRef.current?.();
+      }, autoStopS * 1000);
+    }
     setBleState('videoRecording');
     log(`Video recording started — videoStartPhoneMs=${startMs}`, 'ok');
 
@@ -562,6 +606,11 @@ export default function RecordScreen({ route, navigation }) {
         setVideoUri(result.uri);
         videoUriRef.current = result.uri;
         log(`Video saved: ${result.uri.split('/').pop()}`, 'ok');
+        // Copy to the camera roll. recordAsync writes to app cache, which is not browsable
+        // and is not what the upload queue leaves behind — without this the only way to
+        // review footage is the Video Overlay screen, before navigating away from results.
+        // Non-fatal by design: the session, the upload and the overlay all work regardless.
+        saveVideoToLibrary(result.uri);
       } else {
         log('Video recording ended without a file', 'warn');
       }
@@ -577,13 +626,14 @@ export default function RecordScreen({ route, navigation }) {
         stopVideoRef.current?.();
       }
     }
-  }, [writeCmd, log, startSequence, seq]);
+  }, [writeCmd, log, startSequence, seq, autoStopS, saveVideoToLibrary]);
 
   const stopVideoRecording = useCallback(async () => {
     if (isStoppingRef.current) { log('stopVideoRecording called twice — ignoring', 'warn'); return; }
     isStoppingRef.current = true;
     stopRequestedRef.current = true; // covers the pre-recordAsync window (see onCameraReady)
     clearInterval(elapsedTimerRef.current);
+    clearTimeout(autoStopTimerRef.current);
     try { cameraRef.current?.stopRecording(); } catch {} // resolves the recordAsync above
     try {
       await writeCmd('STOP');
@@ -602,6 +652,9 @@ export default function RecordScreen({ route, navigation }) {
     subscriptionRef.current = null;
     clearTimeout(stallTimerRef.current);
     clearInterval(elapsedTimerRef.current);
+    // Must be cleared here too: reset() drops isStoppingRef, so a surviving deadline would
+    // pass the double-stop guard and fire a real STOP into an abandoned session.
+    clearTimeout(autoStopTimerRef.current);
     samplesRef.current = [];
     isStoppingRef.current = false;
     setSampleCount(0);
@@ -674,6 +727,11 @@ export default function RecordScreen({ route, navigation }) {
             {bleState === 'videoRecording' ? (
               <>
                 <Text style={styles.cameraTimer}>{fmtElapsed(elapsedS)}</Text>
+                {autoStopS > 0 && (
+                  <Text style={styles.hintText}>
+                    Auto-stop in {Math.max(0, autoStopS - elapsedS)}s
+                  </Text>
+                )}
                 <TouchableOpacity style={styles.stopBtn} onPress={stopVideoRecording}>
                   <Text style={styles.btnText}>Stop</Text>
                 </TouchableOpacity>
@@ -713,6 +771,11 @@ export default function RecordScreen({ route, navigation }) {
           <>
             <Text style={styles.counterLabel}>Recording on device</Text>
             <Text style={styles.counter}>{fmtElapsed(elapsedS)}</Text>
+            {autoStopS > 0 && (
+              <Text style={styles.hintText}>
+                Auto-stop in {Math.max(0, autoStopS - elapsedS)}s
+              </Text>
+            )}
             <Text style={styles.hintText}>
               Data is buffered on the device and retrieved after stopping.
             </Text>

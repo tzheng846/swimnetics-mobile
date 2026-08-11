@@ -934,6 +934,7 @@ export default function RecordScreen({ route, navigation }) {
             unitFactor={unitFactor}
             unitLabel={velUnit}
             interactive
+            brush
             dark
           />
 

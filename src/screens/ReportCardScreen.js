@@ -478,6 +478,7 @@ export default function ReportCardScreen({ route, navigation }) {
           unitFactor={unitFactor}
           unitLabel={velUnit}
           interactive
+          brush
           cycleBoundaries={cycleBoundaries}
           onInteractionStart={() => setScrollEnabled(false)}
           onInteractionEnd={() => setScrollEnabled(true)}

@@ -5,6 +5,8 @@ import {
   ScrollView, Alert,
 } from 'react-native';
 import * as FileSystem from 'expo-file-system/legacy';
+import * as Crypto from 'expo-crypto';
+import QRCode from 'react-native-qrcode-svg';
 import { Buffer } from 'buffer';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
@@ -85,6 +87,10 @@ export default function RecordScreen({ route, navigation }) {
   const [apiResult, setApiResult]     = useState(null);
   const [elapsedS, setElapsedS]       = useState(0);
   const [sessionStartPhoneMs, setSessionStartPhoneMs] = useState(null);
+  // QR slate (Phase 70): a per-recording token shown as a QR for an external camera to film, then
+  // sent to /process so the web can match the clip to this session. Ref for the async upload.
+  const [recordingToken, setRecordingToken] = useState(null);
+  const recordingTokenRef = useRef(null);
 
   // ── Video overlay capture (in-app camera + device, one tap) ──────────────────
   const [camPermission, requestCamPermission] = useCameraPermissions();
@@ -249,6 +255,7 @@ export default function RecordScreen({ route, navigation }) {
       if (sessionName)  parameters.name       = sessionName;
       if (sessionNotes) parameters.notes      = sessionNotes;
       if (chipId)       parameters.device_id  = chipId;
+      if (recordingTokenRef.current) parameters.recording_token = recordingTokenRef.current;
 
       const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
         httpMethod: 'POST',
@@ -451,6 +458,10 @@ export default function RecordScreen({ route, navigation }) {
           stopPlainRef.current?.();
         }, autoStopS * 1000);
       }
+      // QR slate: fresh token per recording (overwrites any prior), rendered as a QR below.
+      const tok = Crypto.randomUUID();
+      recordingTokenRef.current = tok;
+      setRecordingToken(tok);
       setBleState('recording');
     } catch (e) {
       log(`START failed: ${e.message}`, 'error');
@@ -780,6 +791,14 @@ export default function RecordScreen({ route, navigation }) {
             <Text style={styles.hintText}>
               Data is buffered on the device and retrieved after stopping.
             </Text>
+            {recordingToken && (
+              <View style={styles.qrWrap}>
+                <QRCode value={recordingToken} size={160} backgroundColor="white" color="black" />
+                <Text style={styles.qrHint}>
+                  Film this QR with your external camera to auto-match the clip.
+                </Text>
+              </View>
+            )}
             <TouchableOpacity style={styles.stopBtn} onPress={stopRecording}>
               <Text style={styles.btnText}>Stop Recording</Text>
             </TouchableOpacity>
@@ -1138,6 +1157,8 @@ const styles = StyleSheet.create({
   btnText:      { color: colors.white, fontSize: 16, fontWeight: '600' },
   statusText:   { fontSize: 15, color: colors.white, marginTop: 12, textAlign: 'center' },
   hintText:     { fontSize: 12, color: colors.textMuted, marginTop: 8, textAlign: 'center', lineHeight: 17 },
+  qrWrap:       { alignItems: 'center', backgroundColor: 'white', borderRadius: 12, padding: 16, marginTop: 20 },
+  qrHint:       { fontSize: 12, color: '#333', marginTop: 10, textAlign: 'center', lineHeight: 17, maxWidth: 200 },
   counterLabel: { fontSize: 14, color: colors.textMuted, marginTop: 20 },
   counter:      { fontSize: 56, fontWeight: '700', color: colors.white },
   pathText:     { fontSize: 12, color: colors.textMuted, marginTop: 4, textAlign: 'center' },

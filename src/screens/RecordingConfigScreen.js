@@ -11,7 +11,13 @@ import { supabase } from '../lib/supabase';
 import { useBle } from '../context/BleContext';
 import { getStartSequenceEnabled, setStartSequenceEnabled } from '../lib/startSequencePrefs';
 import { getAutoStopS, setAutoStopS, DEFAULT_AUTO_STOP_S } from '../lib/autoStopPrefs';
+import { getCameraFacing, setCameraFacing, DEFAULT_CAMERA_FACING } from '../lib/cameraPrefs';
 import { colors, spacing, radii } from '../theme';
+
+const CAMERAS = [
+  { key: 'back', label: 'Back' },
+  { key: 'front', label: 'Front' },
+];
 
 const STROKES = [
   { key: 'breaststroke', label: 'Breast' },
@@ -21,6 +27,13 @@ const STROKES = [
   { key: 'im', label: 'IM' },
   { key: 'udk', label: 'UDK' },
 ];
+
+// Phase 84-02: the race-start sequence is HIDDEN, not deleted. The phone speaker is
+// inaudible poolside, so the countdown and horn cue nobody — and the horn blares before
+// writeCmd('START'), which made an honest coach GO stamp resolve negative and therefore
+// unusable. Flip this to true to bring the control back: useStartSequence.js,
+// StartSequenceOverlay.js, the audio assets and startSequencePrefs.js are all intact.
+const SHOW_START_SEQUENCE_TOGGLE = false;
 
 export default function RecordingConfigScreen({ route, navigation }) {
   const { athleteId, athleteName, defaultStrokeType, headWaistM } = route.params ?? {};
@@ -37,11 +50,16 @@ export default function RecordingConfigScreen({ route, navigation }) {
   const [sessionName, setSessionName] = useState('');
   const [sessionNotes, setSessionNotes] = useState('');
   const [connectingId, setConnectingId] = useState(null);
-  const [startSequence, setStartSequence] = useState(true);
+  // false, not true: getStartSequenceEnabled() is async, and seeding this ON made the
+  // toggle flash on before snapping off — and let a fast Continue ship startSequence:true
+  // to RecordScreen despite the stored pref being off (Phase 84-02).
+  const [startSequence, setStartSequence] = useState(false);
   // Auto-stop: 0 = off. `autoStopText` is the raw field content so a mid-typing empty field
   // does not read as 0 and silently switch the feature off.
   const [autoStopS, setAutoStopSState] = useState(DEFAULT_AUTO_STOP_S);
   const [autoStopText, setAutoStopText] = useState(String(DEFAULT_AUTO_STOP_S));
+  // Seeded to the literal default, never to a pending promise — same reason as startSequence above.
+  const [cameraFacing, setCameraFacingState] = useState(DEFAULT_CAMERA_FACING);
 
   const isConnected = connectionStatus === 'connected';
 
@@ -69,7 +87,7 @@ export default function RecordingConfigScreen({ route, navigation }) {
     navigation.setParams({ athleteId: undefined, athleteName: undefined, defaultStrokeType: undefined });
   }, [athleteId, athletes]);
 
-  // Mount-only is correct for these two: they are prefs changed only on this screen, so local
+  // Mount-only is correct for these: they are prefs changed only on this screen, so local
   // state stays authoritative. (Unlike the roster above, which needed useFocusEffect.)
   useEffect(() => {
     getStartSequenceEnabled().then(setStartSequence);
@@ -77,7 +95,13 @@ export default function RecordingConfigScreen({ route, navigation }) {
       setAutoStopSState(s);
       if (s > 0) setAutoStopText(String(s));
     });
+    getCameraFacing().then(setCameraFacingState);
   }, []);
+
+  const pickCameraFacing = (v) => {
+    setCameraFacingState(v);
+    setCameraFacing(v);
+  };
 
   const toggleStartSequence = (v) => {
     setStartSequence(v);
@@ -137,6 +161,7 @@ export default function RecordingConfigScreen({ route, navigation }) {
       sessionNotes: sessionNotes.trim() || null,
       startSequence,
       autoStopS,
+      cameraFacing,
     });
   };
 
@@ -239,17 +264,35 @@ export default function RecordingConfigScreen({ route, navigation }) {
             autoCapitalize="sentences"
           />
 
-          {/* Race-start sequence */}
-          <View style={st.toggleRow}>
-            <View style={{ flex: 1, paddingRight: spacing.md }}>
-              <AppText variant="body" color="text">Race start sequence</AppText>
-              <AppText variant="caption" color="textMuted">Countdown + “take your marks” + start horn</AppText>
+          {/* Race-start sequence — hidden; see SHOW_START_SEQUENCE_TOGGLE above */}
+          {SHOW_START_SEQUENCE_TOGGLE && (
+            <View style={st.toggleRow}>
+              <View style={{ flex: 1, paddingRight: spacing.md }}>
+                <AppText variant="body" color="text">Race start sequence</AppText>
+                <AppText variant="caption" color="textMuted">Countdown + “take your marks” + start horn</AppText>
+              </View>
+              <Switch
+                value={startSequence}
+                onValueChange={toggleStartSequence}
+                trackColor={{ true: colors.primary, false: colors.border }}
+              />
             </View>
-            <Switch
-              value={startSequence}
-              onValueChange={toggleStartSequence}
-              trackColor={{ true: colors.primary, false: colors.border }}
-            />
+          )}
+
+          {/* Camera lens — must be chosen HERE, not on the recording screen: `facing` swaps the
+              capture session's input device, which is not safe mid-record, and there is no
+              pre-recording preview to flip from. Two labelled options, not a Switch, because a
+              Switch cannot say which side is which. */}
+          <AppText variant="label" color="textSecondary" style={st.label}>Camera</AppText>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            {CAMERAS.map(cam => {
+              const on = cameraFacing === cam.key;
+              return (
+                <Pressable key={cam.key} style={[st.strokeBtn, on && st.strokeBtnOn]} onPress={() => pickCameraFacing(cam.key)}>
+                  <AppText variant="label" color={on ? colors.white : 'textSecondary'}>{cam.label}</AppText>
+                </Pressable>
+              );
+            })}
           </View>
 
           {/* Auto-stop — lets one person record alone instead of swimming back to tap Stop */}

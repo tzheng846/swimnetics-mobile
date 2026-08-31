@@ -75,6 +75,11 @@ export default function VelocityChart({
     PanResponder.create({
       onStartShouldSetPanResponder: () => false,
       onMoveShouldSetPanResponder: (evt, g) => Math.abs(g.dx) > Math.abs(g.dy),
+      // Same class of bug as the brush below, smaller blast radius. This only grants on a
+      // horizontal-dominant move, so it never blocked a plain vertical scroll from starting — but
+      // once granted, a vertical drift let the parent ScrollView take the responder and killed the
+      // scrub cursor mid-read.
+      onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (evt) => {
         onInteractionStartRef.current?.();
         handleTouchRef.current?.(evt.nativeEvent.locationX);
@@ -99,6 +104,12 @@ export default function VelocityChart({
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
+      // The reported bug: RN defaults this to `true`, so the parent ScrollView's native recognizer
+      // asked for the responder the moment the finger drifted off the 30pt strip and the brush
+      // handed it over MID-DRAG — sideways scrubbing turned into page scroll. ReportCard's
+      // `scrollEnabled=false` cannot be the guard (async React state, may not have landed
+      // natively), and RecordScreen's results chart never sets it at all.
+      onPanResponderTerminationRequest: () => false,
       onPanResponderGrant: (evt) => {
         onInteractionStartRef.current?.();
         brushTouchRef.current?.('grant', evt.nativeEvent.locationX);

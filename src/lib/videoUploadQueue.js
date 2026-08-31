@@ -2,12 +2,19 @@
 //
 // Module singleton (no React): RecordScreen enqueues a job and forgets; jobs upload
 // FIFO one-at-a-time via FileSystem.uploadAsync so the transfer survives the screen
-// unmounting, and (sessionType BACKGROUND, iOS) the app being backgrounded. Failures
-// auto-retry twice with backoff, then park as 'failed' for the UploadToast chip.
+// unmounting, and (sessionType BACKGROUND, iOS) the app being backgrounded. TRANSIENT failures
+// auto-retry twice with backoff; PERMANENT ones (over-cap, expired sign-in, missing session — see
+// uploadRetry.js) park as 'failed' immediately, because retrying cannot change them.
 // In-memory only — jobs do not survive an app restart (the video file stays on disk).
 import * as FileSystem from 'expo-file-system/legacy';
 import { API_BASE } from '../config';
 import { supabase } from './supabase';
+import {
+  MAX_VIDEO_BYTES,
+  classifyUploadFailure,
+  videoMissingMessage,
+  videoTooLargeMessage,
+} from './uploadRetry';
 
 const RETRY_DELAYS_MS = [3000, 10000]; // after 1st and 2nd failure
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -46,6 +53,7 @@ export function enqueue({ sessionId, uri, label }) {
     status: 'queued', // queued | uploading | done | failed
     attempts: 0,
     lastError: null,
+    permanent: false, // true once a failure is known to be unretryable (uploadRetry.js)
   };
   jobs.push(job);
   notify();
@@ -60,6 +68,7 @@ export function retryJob(jobId) {
   job.status = 'queued';
   job.attempts = 0;
   job.lastError = null;
+  job.permanent = false;
   notify();
   pump();
 }
@@ -72,7 +81,21 @@ export function dismissJob(jobId) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Attach permanence to an Error so pump's existing catch can read it without restructuring.
+function permanentError(message) {
+  const err = new Error(message);
+  err.permanent = true;
+  return err;
+}
+
 async function uploadOnce(job) {
+  // Pre-flight: api.py rejects anything over MAX_VIDEO_BYTES on `file.size` before it does any
+  // storage work, so an over-cap clip 413s every time. Checking here fails it in a second instead
+  // of ~13 s, and the message can name the ACTUAL size, which the 413 response cannot.
+  const info = await FileSystem.getInfoAsync(job.uri, { size: true });
+  if (!info?.exists) throw permanentError(videoMissingMessage());
+  if (info.size > MAX_VIDEO_BYTES) throw permanentError(videoTooLargeMessage(info.size));
+
   const { data } = await supabase.auth.getSession();
   const token = data?.session?.access_token;
   if (!token) throw new Error('Not signed in');
@@ -93,7 +116,10 @@ async function uploadOnce(job) {
     },
   );
   if (res.status < 200 || res.status >= 300) {
-    throw new Error(`Server error (${res.status})`);
+    const { permanent, message } = classifyUploadFailure({ status: res.status });
+    const err = new Error(message);
+    err.permanent = permanent;
+    throw err;
   }
 }
 
@@ -117,13 +143,20 @@ async function pump() {
           notify();
         }, DONE_PRUNE_MS);
       } catch (e) {
-        job.lastError = e?.message || 'Upload failed';
-        if (job.attempts < MAX_ATTEMPTS) {
+        // uploadOnce decides what it can (pre-flight size/existence, and the HTTP status). Anything
+        // else reaching here is a thrown error with no status — network/offline — so classify it
+        // too, or the chip would show a raw fetch message.
+        const decided = e?.permanent === undefined
+          ? classifyUploadFailure({ message: e?.message })
+          : { permanent: e.permanent, message: e.message };
+        job.permanent = decided.permanent === true;
+        job.lastError = decided.message || 'Upload failed';
+        if (!job.permanent && job.attempts < MAX_ATTEMPTS) {
           job.status = 'queued'; // retry — stays at the front (FIFO by array order)
           notify();
           await sleep(RETRY_DELAYS_MS[job.attempts - 1]);
         } else {
-          job.status = 'failed'; // parked for the chip
+          job.status = 'failed'; // parked for the chip; a permanent failure parks on attempt 1
           notify();
         }
       }

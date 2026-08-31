@@ -61,12 +61,25 @@ export default function UploadToast() {
     <View pointerEvents="box-none" style={[styles.host, { bottom }]}>
       {failedJobs.map(j => (
         <View key={j.id} style={styles.chip}>
-          <Text style={styles.chipText} numberOfLines={1}>
-            Video upload failed
-          </Text>
-          <TouchableOpacity onPress={() => retryJob(j.id)} hitSlop={HIT}>
-            <Text style={styles.chipAction}>Retry</Text>
-          </TouchableOpacity>
+          <View style={styles.chipBody}>
+            <Text style={styles.chipText} numberOfLines={1}>
+              Video upload failed
+            </Text>
+            {/* The reason was always stored on the job and never shown — which is how an
+                over-cap clip could go missing with no explanation (Phase 84-05). */}
+            {!!j.lastError && (
+              <Text style={styles.chipReason} numberOfLines={2}>
+                {j.lastError}
+              </Text>
+            )}
+          </View>
+          {/* No Retry on a permanent failure: it would re-run the same check and fail
+              identically, so the button would be a false affordance. */}
+          {!j.permanent && (
+            <TouchableOpacity onPress={() => retryJob(j.id)} hitSlop={HIT}>
+              <Text style={styles.chipAction}>Retry</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity onPress={() => dismissJob(j.id)} hitSlop={HIT}>
             <Text style={styles.chipDismiss}>✕</Text>
           </TouchableOpacity>
@@ -116,7 +129,10 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     maxWidth: '86%',
   },
+  chipBody: { flexShrink: 1 },
   chipText: { color: colors.needsWork, fontSize: 13, fontWeight: '600', flexShrink: 1 },
+  // Muted against needsWorkBg but still legible — this line carries the actual reason.
+  chipReason: { color: colors.text, fontSize: 11, lineHeight: 14, marginTop: 2, opacity: 0.8 },
   chipAction: { color: colors.primary, fontSize: 13, fontWeight: '700' },
   chipDismiss: { color: colors.textMuted, fontSize: 13, fontWeight: '700' },
 });

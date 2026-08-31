@@ -34,7 +34,25 @@ const NUS_RX_CHAR = '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'; // phone → device 
 //   Sample packets = any non-zero multiple of 7 bytes
 const META_SIZE = 8;
 const END_OF_DUMP_MARKER = 0xEE;
-const RETRIEVAL_STALL_MS = 30000;
+// Phase 74: a stalled dump now auto-retries before failing. Stall shortened from 30 s (it resets on
+// every packet, so active streaming is unaffected) so a genuinely stuck dump recovers quickly.
+const RETRIEVAL_STALL_MS = 8000;
+const MAX_RETRIEVAL_ATTEMPTS = 2;
+
+// Zoom ladder for the live recording overlay (Phase 84-05).
+//
+// ⚠ NO preset may be labelled with a magnification factor except 1x. expo-camera's iOS side sets
+// `videoZoomFactor = pow(activeFormat.videoMaxZoomFactor, zoom)` — an EXPONENTIAL scale against a
+// ceiling that varies by device AND active format and cannot be read from JS. So zoom=0.45 is a
+// very different magnification on two phones, and only zoom=0 has a truthful number: exactly 1x.
+// The ladder is deliberately shallow for the same reason — 0.75 would be ~8x on one device and
+// ~37x on another.
+const ZOOM_STEPS = [
+  { label: '1x',   value: 0 },
+  { label: 'Low',  value: 0.15 },
+  { label: 'Med',  value: 0.30 },
+  { label: 'High', value: 0.45 },
+];
 
 // ── Packet parser ─────────────────────────────────────────────────────────────
 // Sample: [uint32 timestamp_us LE][uint16 angle_counts LE][uint8 magnet_ok]
@@ -65,7 +83,7 @@ function parsePacket(base64) {
 export default function RecordScreen({ route, navigation }) {
   // autoStopS defaults to 0 (disabled) so any caller that omits it — including a stale params
   // object on RecordingConfig, which is a tab screen that never unmounts — behaves as before.
-  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null, startSequence = true, autoStopS = 0 } = route?.params ?? {};
+  const { athleteId, athleteName, strokeType = 'breaststroke', headWaistM = 0, sessionName = null, sessionNotes = null, startSequence = false, autoStopS = 0, cameraFacing = 'back' } = route?.params ?? {};
   useEffect(() => { navigation.setOptions({ gestureEnabled: false }); }, []);
 
   // Race-start cue (3-2-1 → "take your marks" → random hold → blare). Gates START.
@@ -97,6 +115,9 @@ export default function RecordScreen({ route, navigation }) {
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const [videoMode, setVideoMode]             = useState(false); // camera UI mounted
   const [videoUri, setVideoUri]               = useState(null);
+  // Deliberately NOT persisted: zoom is framing for one physical setup (where the phone sits
+  // relative to the lane), so carrying it into the next session would silently mis-frame it.
+  const [zoom, setZoom]                       = useState(0);
   const [videoStartPhoneMs, setVideoStartPhoneMs] = useState(null);
   const cameraRef             = useRef(null);
   const videoUriRef           = useRef(null);  // mirror of videoUri — uploadAndProcess reads it without a dep
@@ -104,6 +125,15 @@ export default function RecordScreen({ route, navigation }) {
   const stopRequestedRef      = useRef(false); // stop tapped before recordAsync started
   const stopVideoRef          = useRef(null);  // lets onCameraReady auto-stop without a dep cycle
   const stopPlainRef          = useRef(null);  // same, for the plain path's auto-stop deadline
+
+  // ── Coach GO marker (Phase 84-02) ────────────────────────────────────────────
+  // Refs, not state, for the same reason videoUriRef exists: uploadAndProcess is a
+  // useCallback that must read these without a dep. The press cannot convert to session
+  // time yet — META (the phone↔encoder correlation) only arrives at retrieval — so the
+  // raw Date.now() is stashed here and converted in the META handler.
+  const goPressPhoneMsRef = useRef(null);  // raw Date.now() at press
+  const goSignalSRef      = useRef(null);  // converted session-clock seconds, or null
+  const [goStampS, setGoStampS] = useState(null);  // label only — refs do not re-render
 
   // On-screen error detail — console.log is invisible in a TestFlight build,
   // so failures must surface in the UI to be debuggable at the pool.
@@ -115,6 +145,7 @@ export default function RecordScreen({ route, navigation }) {
   const stallTimerRef   = useRef(null);
   const metaSeenRef     = useRef(false);
   const dumpDoneRef     = useRef(false);
+  const retrievalAttemptRef = useRef(0);  // Phase 74: auto-retry count for a stalled dump
   const elapsedTimerRef = useRef(null);
   // Auto-stop deadline. Armed where the elapsed tick starts, cleared everywhere it is cleared.
   const autoStopTimerRef = useRef(null);
@@ -256,6 +287,9 @@ export default function RecordScreen({ route, navigation }) {
       if (sessionNotes) parameters.notes      = sessionNotes;
       if (chipId)       parameters.device_id  = chipId;
       if (recordingTokenRef.current) parameters.recording_token = recordingTokenRef.current;
+      // A form field on the swim's own request, never a follow-up PUT — a fire-and-forget
+      // second call is exactly the silent-loss shape that makes uploads vanish.
+      if (goSignalSRef.current != null) parameters.go_signal_s = String(goSignalSRef.current);
 
       const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
         httpMethod: 'POST',
@@ -329,26 +363,39 @@ export default function RecordScreen({ route, navigation }) {
       return;
     }
     if (stalled) {
-      Alert.alert('Retrieval Incomplete',
-        'The end-of-dump marker never arrived. Saving what was received.');
+      // Phase 74: the device retains the session until the phone confirms with CLEAR, so a stalled
+      // save is not a lost swim — surface the received count and that it can be retried.
+      const msg = `The end-of-dump marker never arrived after ${MAX_RETRIEVAL_ATTEMPTS} retries. `
+        + `Saved the ${captured.length} samples received so far. The session is still on the device — `
+        + `reconnect and tap Retrieve to try again.`;
+      Alert.alert('Retrieval Incomplete', msg);
+      setErrorMsg(msg);
     }
 
     setBleState('saving');
     try {
       const { path } = await saveCSV(captured);
       setSavedPath(path);
+      // Phase 74: the CSV is safely on disk — only now tell the device it may free its buffer, and
+      // only on a clean (marker-received) retrieval. A stalled/partial save deliberately does NOT
+      // CLEAR, so the full session stays on the device for a later retry. Fire-and-forget: a CLEAR
+      // failure must never break saving or upload.
+      if (!stalled) {
+        writeCmd('CLEAR').catch(e => log(`CLEAR failed (non-fatal): ${e.message}`, 'warn'));
+      }
       uploadAndProcess(path); // fire-and-forget — manages its own state transitions
     } catch (e) {
       log(`Save failed: ${e.message}`, 'error');
       setErrorMsg(`Saving the session CSV failed: ${e.message}`);
       setBleState('error');
     }
-  }, [log, saveCSV, uploadAndProcess]);
+  }, [log, saveCSV, uploadAndProcess, writeCmd]);
 
   const runRetrieval = useCallback(async () => {
     samplesRef.current = [];
     metaSeenRef.current = false;
     dumpDoneRef.current = false;
+    retrievalAttemptRef.current = 0;
     setSampleCount(0);
     setSavedPath(null);
     setSessionStartPhoneMs(null);
@@ -356,12 +403,41 @@ export default function RecordScreen({ route, navigation }) {
     setBleState('retrieving');
     log('Starting retrieval (META → DUMP)...');
 
-    const resetStallTimer = () => {
+    // One dump pass: drop any partial samples and re-issue META (the subscription callback writes
+    // DUMP on the 8-byte reply). Used for retries. The device retains its buffer until CLEAR
+    // (Phase 74), so a re-issued META returns the same session and DUMP re-streams it in full —
+    // no duplication, because the previous pass's partial samples are discarded here.
+    // Declared as hoisted functions (not const arrows): they reference each other, and hoisting
+    // keeps that mutual reference clean regardless of order.
+    function sendDumpHandshake() {
+      samplesRef.current = [];
+      setSampleCount(0);
+      metaSeenRef.current = false;
+      resetStallTimer();
+      writeCmd('META')
+        .then(() => log(`META re-sent (retry ${retrievalAttemptRef.current})`, 'ok'))
+        .catch(e => {
+          log(`META retry write failed: ${e.message}`, 'error');
+          finishRetrieval(true);
+        });
+    }
+
+    function resetStallTimer() {
       clearTimeout(stallTimerRef.current);
       stallTimerRef.current = setTimeout(() => {
-        if (!dumpDoneRef.current) finishRetrieval(true);
+        if (dumpDoneRef.current) return;
+        // Auto-retry a stalled dump before giving up. With the buffer retained on the device, a
+        // fresh META → DUMP re-streams the whole session (Phase 74). Only after the retries are
+        // exhausted do we surface the failure and save whatever arrived.
+        if (retrievalAttemptRef.current < MAX_RETRIEVAL_ATTEMPTS) {
+          retrievalAttemptRef.current += 1;
+          log(`Retrieval stalled — retrying dump ${retrievalAttemptRef.current}/${MAX_RETRIEVAL_ATTEMPTS}`, 'warn');
+          sendDumpHandshake();
+        } else {
+          finishRetrieval(true);
+        }
       }, RETRIEVAL_STALL_MS);
-    };
+    }
 
     try {
       // Subscribe FIRST — before sending any command (locked pattern)
@@ -399,6 +475,20 @@ export default function RecordScreen({ route, navigation }) {
             const elapsedUs = (deviceNowUs - sessionStartUs + 2 ** 32) % 2 ** 32;
             const startPhoneMs = phoneNowMs - elapsedUs / 1000;
             setSessionStartPhoneMs(startPhoneMs);
+
+            // GO marker → session clock. startPhoneMs is encoder t=0 on the phone clock.
+            if (goPressPhoneMsRef.current != null) {
+              const g = (goPressPhoneMsRef.current - startPhoneMs) / 1000;
+              if (g >= 0) {
+                goSignalSRef.current = g;
+                log(`GO at ${g.toFixed(2)} s`, 'ok');
+              } else {
+                // Dropped, not clamped: a negative is a bad input, not a measurement.
+                goSignalSRef.current = null;
+                log(`GO resolved to ${g.toFixed(2)} s (before t=0) — dropped`, 'warn');
+              }
+            }
+
             log(`META: session started ${(elapsedUs / 1e6).toFixed(2)} s ago — `
                 + `sessionStartPhoneMs=${startPhoneMs.toFixed(0)} `
                 + `(${new Date(startPhoneMs).toISOString()})`, 'ok');
@@ -546,6 +636,9 @@ export default function RecordScreen({ route, navigation }) {
     videoUriRef.current = null;
     setVideoStartPhoneMs(null);
     videoOrchestratedRef.current = false;
+    goPressPhoneMsRef.current = null;
+    goSignalSRef.current = null;
+    setGoStampS(null);
     setVideoMode(true); // mounts CameraView → onCameraReady runs the orchestration
   }, [connectionStatus, checkEncoder, camPermission, micPermission, requestCamPermission, requestMicPermission]);
 
@@ -682,12 +775,24 @@ export default function RecordScreen({ route, navigation }) {
     setVideoStartPhoneMs(null);
     videoOrchestratedRef.current = false;
     stopRequestedRef.current = false;
+    goPressPhoneMsRef.current = null;
+    goSignalSRef.current = null;
+    setGoStampS(null);
     setErrorMsg(null);
     log('--- Reset ---');
     setBleState('ready'); // connection lives in BleContext — nothing to rescan
   }, [log]);
 
   const fmtElapsed = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+  // Silent by design (no sound, no haptic, no flash) — the horn is what made an honest GO
+  // stamp impossible in the first place. Last press wins; the label is the only feedback.
+  // Never gates Stop: not pressing GO is a legitimate outcome.
+  const onPressGo = () => {
+    goPressPhoneMsRef.current = Date.now();
+    goSignalSRef.current = null;  // stale conversion from an earlier press must not survive
+    setGoStampS(elapsedS);
+  };
 
   const deviceLabel = connectedDevice?.name ?? 'SwimLogger';
   const notConnected = connectionStatus !== 'connected';
@@ -731,19 +836,54 @@ export default function RecordScreen({ route, navigation }) {
             ref={cameraRef}
             style={styles.camera}
             mode="video"
-            facing="back"
+            facing={cameraFacing}
+            // iOS defaults to 1080p, which the live library measures at ~1.38 MB/s (range
+            // 0.84–2.20) — so the server's 50 MB cap is hit at ~36 s, or ~23 s on the fastest
+            // device seen, and clips were silently rejected. 720p is ~0.44x the pixels, moving
+            // the cap past ~70 s. Set at mount by necessity: videoQuality reconfigures the
+            // capture session, so it cannot change mid-record. (tools/probe_video_uploads.py)
+            videoQuality="720p"
+            zoom={zoom}
             mute={!micPermission?.granted}
             onCameraReady={onCameraReady}
           />
           <View style={styles.cameraControls}>
             {bleState === 'videoRecording' ? (
               <>
+                {/* Zoom sits ABOVE the timer, separated from the GO/Stop pair on purpose: a
+                    mis-tap on Stop costs the session and a mis-tap on GO costs the reaction-time
+                    metric, so these get the smallest targets here. Safe to change mid-record —
+                    updateZoom() only locks the device for configuration; it does not reconfigure
+                    the capture session the way facing and videoQuality do. */}
+                <View style={styles.zoomRow}>
+                  {ZOOM_STEPS.map(step => {
+                    const on = zoom === step.value;
+                    return (
+                      <TouchableOpacity
+                        key={step.label}
+                        style={[styles.zoomBtn, on && styles.zoomBtnOn]}
+                        onPress={() => setZoom(step.value)}
+                      >
+                        <Text style={[styles.zoomBtnText, on && styles.zoomBtnTextOn]}>{step.label}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
                 <Text style={styles.cameraTimer}>{fmtElapsed(elapsedS)}</Text>
                 {autoStopS > 0 && (
                   <Text style={styles.hintText}>
                     Auto-stop in {Math.max(0, autoStopS - elapsedS)}s
                   </Text>
                 )}
+                <TouchableOpacity
+                  style={[styles.goBtn, goStampS != null && styles.goBtnStamped]}
+                  onPress={onPressGo}
+                >
+                  <Text style={[styles.goBtnText, goStampS != null && styles.goBtnTextStamped]}>
+                    {goStampS != null ? `GO ✓ ${fmtElapsed(goStampS)}` : 'GO'}
+                  </Text>
+                </TouchableOpacity>
+                <Text style={styles.goHint}>Marks when you sent the swimmer off.</Text>
                 <TouchableOpacity style={styles.stopBtn} onPress={stopVideoRecording}>
                   <Text style={styles.btnText}>Stop</Text>
                 </TouchableOpacity>
@@ -788,6 +928,15 @@ export default function RecordScreen({ route, navigation }) {
                 Auto-stop in {Math.max(0, autoStopS - elapsedS)}s
               </Text>
             )}
+            <TouchableOpacity
+              style={[styles.goBtn, goStampS != null && styles.goBtnStamped]}
+              onPress={onPressGo}
+            >
+              <Text style={[styles.goBtnText, goStampS != null && styles.goBtnTextStamped]}>
+                {goStampS != null ? `GO ✓ ${fmtElapsed(goStampS)}` : 'GO'}
+              </Text>
+            </TouchableOpacity>
+            <Text style={styles.goHint}>Marks when you sent the swimmer off.</Text>
             <Text style={styles.hintText}>
               Data is buffered on the device and retrieved after stopping.
             </Text>
@@ -1193,6 +1342,19 @@ const styles = StyleSheet.create({
   camera:       { width: '100%', aspectRatio: 3 / 4, borderRadius: 12, overflow: 'hidden' },
   cameraControls: { alignItems: 'center', paddingTop: 8 },
   cameraTimer:  { fontSize: 40, fontWeight: '700', color: colors.white },
+  // Small targets by design — see the placement note at the zoom row.
+  zoomRow:      { flexDirection: 'row', gap: 8, marginBottom: 10 },
+  zoomBtn:      { borderWidth: 1, borderColor: colors.textMuted, borderRadius: 8, paddingVertical: 6, paddingHorizontal: 14 },
+  zoomBtnOn:    { backgroundColor: colors.white, borderColor: colors.white },
+  zoomBtnText:  { color: colors.textMuted, fontSize: 13, fontWeight: '600' },
+  zoomBtnTextOn:{ color: colors.text, fontSize: 13, fontWeight: '700' },
+  // Green, and deliberately unlike stopBtn's red — Stop is the destructive one and must
+  // stay unmistakable when a coach reaches for a button under pressure.
+  goBtn:        { backgroundColor: colors.good, borderWidth: 2, borderColor: colors.good, borderRadius: 12, paddingVertical: 14, paddingHorizontal: 44, marginTop: 16, alignItems: 'center' },
+  goBtnStamped: { backgroundColor: 'transparent' },
+  goBtnText:    { color: colors.white, fontSize: 18, fontWeight: '700', letterSpacing: 1 },
+  goBtnTextStamped: { color: colors.good },
+  goHint:       { fontSize: 12, color: colors.textMuted, marginTop: 6, textAlign: 'center' },
   overlayBtn:   { backgroundColor: colors.primary, borderRadius: 12, paddingVertical: 14, alignItems: 'center', marginTop: 12 },
   saveStatus:   { fontSize: 12, textAlign: 'center', marginTop: 12, marginBottom: 4 },
   saveOk:       { color: colors.good },

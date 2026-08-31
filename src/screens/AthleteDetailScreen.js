@@ -10,15 +10,16 @@ import { PillarIcon } from '../components/ui/PillarIcons';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import { WEB_BASE } from '../config';
+import { bandColor, bandLabel } from '../lib/indicators';
 import { colors, spacing, radii } from '../theme';
 
 const REPORT_METRIC_KEYS = ['mean_vel_ms', 'max_vel_ms', 'stroke_rate_spm', 'mean_dps_m', 'lap_time_s', 'cv_arm_peak_vel'];
-const BAND_LABEL = { good: 'good', ok: 'ok', needs_work: 'needs work', unknown: '—' };
-// Bands are snake_case; token keys are camelCase — map explicitly.
-const BAND_COLOR = { good: colors.good, ok: colors.ok, needs_work: colors.needsWork };
 
 export default function AthleteDetailScreen({ route, navigation }) {
   const athlete = route.params?.athlete || {};
+  // Sent by the roster alongside the athlete. Deliberately unguarded: this screen sits on the Root
+  // stack and a future caller could navigate without it — bandColor() is total, so absent is fine.
+  const ratingColors = route.params?.ratingColors;
   const { session, coachId } = useAuth();
 
   const [sessions, setSessions] = useState(null);
@@ -152,14 +153,14 @@ export default function AthleteDetailScreen({ route, navigation }) {
       {pillars.length ? (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between' }}>
           {pillars.map((p) => {
-            const c = BAND_COLOR[p.band] || colors.textMuted;
+            const c = bandColor(p.band, ratingColors);
             return (
               <Card key={p.key} alt style={{ width: '48.5%', marginBottom: spacing.sm }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                   <PillarIcon pillarKey={p.key} color={colors.textSecondary} size={14} />
                   <AppText variant="caption" color="textSecondary">{p.label}</AppText>
                 </View>
-                <AppText variant="body" color={c} style={{ marginTop: 3 }}>{BAND_LABEL[p.band] || '—'}</AppText>
+                <AppText variant="body" color={c} style={{ marginTop: 3 }}>{bandLabel(p.band, p.provisional)}</AppText>
               </Card>
             );
           })}

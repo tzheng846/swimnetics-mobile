@@ -3,13 +3,14 @@ import {
   View, Text, TouchableOpacity, Pressable, Modal, ActivityIndicator, StyleSheet,
 } from 'react-native';
 import { API_BASE } from '../config';
+import { BAND_LABEL, PROVISIONAL_NOTE, bandColor } from '../lib/indicators';
 import { colors as ui } from '../theme';
 
 // Glanceable good/ok/needs-work read for the four headline pillars — RN mirror of the
 // web PillarCards. Reads GET /sessions/{id}/ratings (ratings.py is the shared source of
-// truth); colors come from the payload, never hard-coded. See RATINGS-SPEC.md.
+// truth); the band label and color come from lib/indicators, which reads the payload
+// (never hard-coded). See RATINGS-SPEC.md.
 
-const VERDICT = { good: 'Good', ok: 'OK', needs_work: 'Needs work' };
 // Trend is vs the athlete's PREVIOUS session — labelled explicitly so a "down vs last" chip
 // reads clearly alongside a still-good (green) band (they measure different things).
 const TREND = {
@@ -64,8 +65,6 @@ function Band({ score, colors }) {
 function PillarCard({ p, colors, unit, onExplain }) {
   const [open, setOpen] = useState(false);
   const unknown = p.band === 'unknown';
-  const verdictColor =
-    p.band === 'good' ? colors.good : p.band === 'ok' ? colors.ok : colors.needs_work;
   const detail = [p.primary, ...(p.metrics || [])].filter((m) => m && m.value != null);
 
   return (
@@ -82,7 +81,7 @@ function PillarCard({ p, colors, unit, onExplain }) {
           <>
             <Band score={p.score} colors={colors} />
             <View style={pc.verdictRow}>
-              <Text style={[pc.verdict, { color: verdictColor }]}>{VERDICT[p.band]}</Text>
+              <Text style={[pc.verdict, { color: bandColor(p.band, colors) }]}>{BAND_LABEL[p.band]}</Text>
               <Text style={pc.caret}>{open ? '▲' : '▼'}</Text>
             </View>
           </>
@@ -164,7 +163,7 @@ export default function PillarCards({ sessionId, token, unit = 'metric' }) {
   return (
     <View>
       {provisional && (
-        <Text style={pc.provisional}>⚠ Provisional — stroke segmentation is still being validated.</Text>
+        <Text style={pc.provisional}>{PROVISIONAL_NOTE}</Text>
       )}
       {data.pillars.map((p) => (
         <PillarCard key={p.key} p={p} colors={data.rating_colors} unit={unit} onExplain={setExplain} />

@@ -8,10 +8,12 @@ import Card from '../components/ui/Card';
 import SectionHeader from '../components/ui/SectionHeader';
 import { SettingsIcon } from '../components/ui/TabIcons';
 import { PillarIcon } from '../components/ui/PillarIcons';
+import BandDot from '../components/ui/BandDot';
 import AiBubble from '../components/ai/AiBubble';
 import { supabase } from '../lib/supabase';
 import { apiFetch } from '../lib/apiFetch';
 import { useAuth } from '../context/AuthContext';
+import { bandColor } from '../lib/indicators';
 import { colors, spacing, radii } from '../theme';
 
 const TIP_PROMPT =
@@ -106,7 +108,9 @@ export default function DashboardScreen({ navigation }) {
     () => Object.fromEntries((data?.athletes || []).map(a => [a.athlete_id, a])),
     [data],
   );
-  const rc = data?.rating_colors || colors;
+  // Straight through to bandColor(), which is total — the old `|| colors` fallback mixed the
+  // snake_case band keys with the camelCase token keys and only worked by key-name coincidence.
+  const rc = data?.rating_colors;
 
   const renderNeedsCard = (n) => {
     const summary = athleteMap[n.athlete_id];
@@ -118,11 +122,11 @@ export default function DashboardScreen({ navigation }) {
     let chipText = '';
     let pillarKey = null;
     if (r?.type === 'needs_work') {
-      chipColor = rc.needs_work || colors.needsWork;
+      chipColor = bandColor('needs_work', rc);
       chipText = `${r.pillar} needs work`;
       pillarKey = pillars.find(p => p.label === r.pillar)?.key;
     } else if (r?.type === 'declined') {
-      chipColor = rc.ok || colors.ok;
+      chipColor = bandColor('ok', rc);
       chipText = `${r.pillar} declined`;
       pillarKey = pillars.find(p => p.label === r.pillar)?.key;
     } else if (r?.type === 'stale') {
@@ -134,9 +138,18 @@ export default function DashboardScreen({ navigation }) {
     return (
       <Card key={n.athlete_id} alt style={{ width: '48.5%', marginBottom: spacing.sm }} padded={false}>
         <View style={{ padding: spacing.md }}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <AppText variant="label" color="text" numberOfLines={1} style={{ flex: 1 }}>{n.name}</AppText>
-            {score != null ? <AppText variant="heading" color="text">{score}</AppText> : null}
+          <AppText variant="label" color="text" numberOfLines={1}>{n.name}</AppText>
+          {/* Bands lead, the same BandDot the roster draws, in ratings.PILLARS order (which is the
+              roster's column order). The 0-100 roll-up is secondary — see 84-03 decision A. */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 8 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              {pillars.length ? (
+                pillars.map(p => <BandDot key={p.key} band={p.band} provisional={p.provisional} ratingColors={rc} />)
+              ) : (
+                <AppText variant="caption" color="textMuted">—</AppText>
+              )}
+            </View>
+            {score != null ? <AppText variant="caption" color="textSecondary">{score}</AppText> : null}
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 7 }}>
             {pillarKey ? <PillarIcon pillarKey={pillarKey} color={chipColor} size={13} /> : null}

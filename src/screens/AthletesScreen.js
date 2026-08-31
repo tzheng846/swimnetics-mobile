@@ -6,15 +6,17 @@ import AppText from '../components/ui/AppText';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import { GaugeIcon, RulerIcon, WaveIcon, BatteryIcon } from '../components/ui/PillarIcons';
+import BandDot from '../components/ui/BandDot';
 import { apiFetch } from '../lib/apiFetch';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
+import { BAND_KEYS, BAND_LABEL } from '../lib/indicators';
 import { colors, spacing, radii } from '../theme';
 
 const PILLAR_ORDER = ['speed', 'stroke_length', 'consistency', 'endurance'];
 const HEADER_ICONS = { speed: GaugeIcon, stroke_length: RulerIcon, consistency: WaveIcon, endurance: BatteryIcon };
-// Bands are snake_case (good/ok/needs_work); token keys are camelCase — map explicitly.
-const BAND_FALLBACK = { good: colors.good, ok: colors.ok, needs_work: colors.needsWork };
+// The legend shows the three rated bands; `unknown` is a per-pillar state, not a legend entry.
+const LEGEND_BANDS = BAND_KEYS.filter((b) => b !== 'unknown');
 
 function relTested(iso) {
   if (!iso) return null;
@@ -81,8 +83,6 @@ export default function AthletesScreen({ navigation }) {
     }
   };
 
-  const bandColor = (band) => rc[band] || BAND_FALLBACK[band] || colors.textMuted;
-
   const renderRow = (a, i) => {
     const byKey = Object.fromEntries((a.pillars || []).map(p => [p.key, p]));
     const tested = relTested(a.last_tested);
@@ -90,7 +90,9 @@ export default function AthletesScreen({ navigation }) {
     return (
       <Pressable
         key={a.athlete_id}
-        onPress={() => navigation.navigate('AthleteDetail', { athlete: a })}
+        // The detail screen has no fetch of its own, so the server's band colors have to travel
+        // with the athlete or that screen would be the one surface deriving them locally.
+        onPress={() => navigation.navigate('AthleteDetail', { athlete: a, ratingColors: rc })}
         style={{
           flexDirection: 'row', alignItems: 'center', paddingVertical: 11,
           borderTopWidth: 1, borderTopColor: i === 0 ? colors.border : colors.surfaceAlt,
@@ -105,7 +107,7 @@ export default function AthletesScreen({ navigation }) {
           return (
             <View key={key} style={{ flex: 1, alignItems: 'center' }}>
               {hasPillars && p ? (
-                <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: bandColor(p.band) }} />
+                <BandDot band={p.band} provisional={p.provisional} ratingColors={rc} />
               ) : (
                 <AppText variant="caption" color="textMuted">—</AppText>
               )}
@@ -174,10 +176,10 @@ export default function AthletesScreen({ navigation }) {
           )}
 
           <View style={{ flexDirection: 'row', gap: spacing.lg, marginTop: spacing.lg }}>
-            {[['good', 'good'], ['ok', 'ok'], ['needs_work', 'needs work']].map(([band, label]) => (
+            {LEGEND_BANDS.map((band) => (
               <View key={band} style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: bandColor(band) }} />
-                <AppText variant="caption" color="textSecondary">{label}</AppText>
+                <BandDot band={band} ratingColors={rc} size={8} />
+                <AppText variant="caption" color="textSecondary">{BAND_LABEL[band]}</AppText>
               </View>
             ))}
           </View>

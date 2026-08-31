@@ -74,6 +74,10 @@ export function BleProvider({ children }) {
         // One auto-retry — covers transient timeouts / a missed first advertisement.
         device = await attempt();
       }
+      // Phase 74: dump packets are 168 bytes (24 samples × 7), needing ATT MTU ≥ 171. iOS
+      // negotiates a large MTU automatically (this is a no-op there); Android defaults to 23, which
+      // would truncate every dump packet. Non-fatal — fall back to whatever was negotiated.
+      await device.requestMTU(185).catch(() => {});
       await device.discoverAllServicesAndCharacteristics();
 
       // Derive chipId from BLE name ("SwimLogger-A1B2C3" → "A1B2C3")

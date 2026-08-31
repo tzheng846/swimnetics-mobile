@@ -7,12 +7,20 @@ import { colors } from '../theme';
 // CycleCharts (web/components/portal/CycleCharts.js), hand-rolled in react-native-svg because
 // there is no chart library on mobile (recharts is web-only; react-native-svg is all we have).
 //
-// ⚠ ALL cycles are plotted, undifferentiated (Phase 60 D8). Every session mean/CV is computed
-// over STEADY cycles only (metrics.py:892), so two mismatches are EXPECTED and deliberate:
-//   1. there are more dots here than session.stroke_count, which IS the steady count (metrics.py:906)
-//   2. the dashed mean line does not sit at the visual average of the dots
-// Do not "fix" these by filtering, hiding or renumbering cycles — that was offered to the user
-// and declined.
+// ⚠ ALL cycles are plotted, undifferentiated (Phase 60 D8). Do not "fix" that by filtering,
+// hiding or renumbering cycles — it was offered to the user and declined.
+//
+// ⚠ THE TWO MISMATCHES THIS COMMENT USED TO DESCRIBE ARE GONE (Phase 61-01, 2026-08-11).
+// It previously said means/CVs cover STEADY cycles only, so there were more dots than
+// session.stroke_count and the mean line sat off the dots' average — and it told you not to fix
+// them. metrics.py no longer splits cycles into steady/ramp_up at all: stroke_count is now the
+// total cycle count and every mean/CV covers every cycle.
+//
+// ⚠ BUT ONLY FOR SESSIONS COMPUTED AFTER THAT CHANGE. Rows stored earlier keep steady-only means
+// and still show the old mismatch. Their cycle dicts carry a `phase` key, which 61-01 stopped
+// emitting — that key is how the web build (web/components/portal/CycleCharts.js) picks which
+// caption to show. Mobile does not yet make that distinction; its footnote is written to be true
+// either way.
 
 const CHART_H = 120;
 const PAD_L = 34;   // room for y-axis labels
@@ -136,8 +144,8 @@ export default function CycleCharts({ cycles, session, unitFactor = 1, distUnit 
         decimals={2}
       />
       <Text style={s.footnote}>
-        One point per detected cycle. Means and CVs are computed over steady-state cycles only, so
-        the dashed line may not sit at the visual average.
+        One point per detected cycle. On sessions processed before the cycle-counting fix, means
+        and CVs cover steady-state cycles only, so the dashed line may sit off the dots' average.
       </Text>
     </View>
   );

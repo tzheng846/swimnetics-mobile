@@ -6,7 +6,12 @@ iOS app for Swimnetics. React Native + Expo bare workflow (SDK 56, RN 0.85.3, He
 
 Coaches use this to record tethered swim sessions via Bluetooth LE, upload the raw data to the backend, and view stroke metrics on their phone — no laptop at poolside.
 
-**Cross-repo system map + connection matrix: see `CODEBASE-AUDIT.md` in the backend repo (`Desktop/myswimcoach`, 2026-06-12).**
+**Data flow — what this app stores locally vs in Supabase, which endpoints it calls, and which
+tables it reads directly: see `DATA-FLOW.md` in the backend repo
+(`C:\Users\TonyZheng\Desktop\myswimcoach\DATA-FLOW.md`, 2026-08-13).** It maps both repos; every
+mobile caller in it is cited as `file:line` against this `src/`.
+
+**Cross-repo folder map + build/deploy state: see `CODEBASE-AUDIT.md` in the backend repo (`Desktop/myswimcoach`, 2026-06-12).** ⚠ Its §4 connection matrix is superseded by DATA-FLOW.md.
 
 ## System connections
 

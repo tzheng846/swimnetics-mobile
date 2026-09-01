@@ -17,6 +17,11 @@ import { useAuth } from '../context/AuthContext';
 import { useBle } from '../context/BleContext';
 import { useUnits } from '../context/UnitsContext';
 import { dropoutWarning } from '../lib/dropoutWarning';
+import {
+  META_PROBE_COUNT, META_PROBE_TIMEOUT_MS, META_PROBE_BUDGET_MS,
+  elapsedUs, probeRttMs, pickBestProbe, sessionStartUtcMsFrom, syncErrorMsFrom,
+  clockOffsetMs, isPlausibleEpochMs,
+} from '../lib/sessionClock';
 import StartSequenceOverlay from '../components/StartSequenceOverlay';
 import useStartSequence from '../hooks/useStartSequence';
 import { parseStatus, magnetVerdict } from '../lib/deviceStatus';
@@ -135,6 +140,20 @@ export default function RecordScreen({ route, navigation }) {
   const goSignalSRef      = useRef(null);  // converted session-clock seconds, or null
   const [goStampS, setGoStampS] = useState(null);  // label only — refs do not re-render
 
+  // ── Session clock (Phase 86-02) ──────────────────────────────────────────────
+  // META used to be a ONE-SHOT: the first 8-byte reply set sessionStartPhoneMs and wrote DUMP. That
+  // attributed the whole inbound BLE leg (20–80 ms) to the encoder, biasing the start LATE. Now a
+  // burst of timed round trips measures it and the minimum-RTT probe wins (src/lib/sessionClock.js).
+  // Refs, not state, for the same reason goSignalSRef is: uploadAndProcess is a useCallback that
+  // must read these without a dep.
+  const metaResolverRef      = useRef(null);  // the pending probe's handler, or null
+  const probeGenRef          = useRef(0);     // bumped by the stalled retry — aborts an in-flight burst
+  const clockProbesRef       = useRef([]);    // successful probes, best-of-N
+  const lastMetaReplyRef     = useRef(null);  // a reply that landed after its probe timed out
+  const sessionStartUtcMsRef = useRef(null);  // corrected start, or null — never uncorrected
+  const syncErrorMsRef       = useRef(null);  // minRtt/2: the correction applied AND what it leaves uncertain
+  const clockOffsetMsRef     = useRef(null);  // phone − server, positive = phone ahead
+
   // On-screen error detail — console.log is invisible in a TestFlight build,
   // so failures must surface in the UI to be debuggable at the pool.
   const [errorMsg, setErrorMsg] = useState(null);
@@ -143,7 +162,6 @@ export default function RecordScreen({ route, navigation }) {
   const samplesRef      = useRef([]);
   const isStoppingRef   = useRef(false);
   const stallTimerRef   = useRef(null);
-  const metaSeenRef     = useRef(false);
   const dumpDoneRef     = useRef(false);
   const retrievalAttemptRef = useRef(0);  // Phase 74: auto-retry count for a stalled dump
   const elapsedTimerRef = useRef(null);
@@ -290,6 +308,19 @@ export default function RecordScreen({ route, navigation }) {
       // A form field on the swim's own request, never a follow-up PUT — a fire-and-forget
       // second call is exactly the silent-loss shape that makes uploads vanish.
       if (goSignalSRef.current != null) parameters.go_signal_s = String(goSignalSRef.current);
+      // Session clock (Phase 86-02) — same form-field-on-the-swim's-own-request rule as go_signal_s.
+      // ⚠ Math.round is LOAD-BEARING. api.py declares session_start_utc_ms as Optional[int], so a
+      // fractional string fails Pydantic coercion BEFORE the handler runs — a 422 that loses the
+      // whole upload. 86-01's drop-don't-422 posture protects a bad value INSIDE the handler; it
+      // cannot protect one that never reaches it. The other two are Optional[float] and need no
+      // rounding. isPlausibleEpochMs mirrors the server's own window, so we never send what it would
+      // silently discard — and there is no backfill: only the phone can produce this, at record time.
+      if (sessionStartUtcMsRef.current != null
+          && isPlausibleEpochMs(sessionStartUtcMsRef.current, Date.now())) {
+        parameters.session_start_utc_ms = String(Math.round(sessionStartUtcMsRef.current));
+      }
+      if (syncErrorMsRef.current   != null) parameters.sync_error_ms   = String(syncErrorMsRef.current);
+      if (clockOffsetMsRef.current != null) parameters.clock_offset_ms = String(clockOffsetMsRef.current);
 
       const result = await FileSystem.uploadAsync(`${API_BASE}/process`, filePath, {
         httpMethod: 'POST',
@@ -393,7 +424,13 @@ export default function RecordScreen({ route, navigation }) {
 
   const runRetrieval = useCallback(async () => {
     samplesRef.current = [];
-    metaSeenRef.current = false;
+    metaResolverRef.current = null;
+    probeGenRef.current += 1;       // a burst left over from a previous retrieval is now stale
+    clockProbesRef.current = [];
+    lastMetaReplyRef.current = null;
+    sessionStartUtcMsRef.current = null;
+    syncErrorMsRef.current = null;
+    clockOffsetMsRef.current = null;
     dumpDoneRef.current = false;
     retrievalAttemptRef.current = 0;
     setSampleCount(0);
@@ -403,23 +440,168 @@ export default function RecordScreen({ route, navigation }) {
     setBleState('retrieving');
     log('Starting retrieval (META → DUMP)...');
 
-    // One dump pass: drop any partial samples and re-issue META (the subscription callback writes
-    // DUMP on the 8-byte reply). Used for retries. The device retains its buffer until CLEAR
-    // (Phase 74), so a re-issued META returns the same session and DUMP re-streams it in full —
+    // Server-clock offset — fired here and NEVER awaited. It runs concurrently with the ~20 s dump,
+    // so it costs no wall clock, and a poolside phone with no network simply leaves the ref null.
+    // Unauthenticated on purpose: that is the whole point of 86-01's GET /time. Measured and
+    // reported, never applied — see the header of src/lib/sessionClock.js.
+    (async () => {
+      const ctrl = new AbortController();
+      const abortTimer = setTimeout(() => ctrl.abort(), 2000);
+      try {
+        const tSendMs = Date.now();
+        const res     = await fetch(`${API_BASE}/time`, { signal: ctrl.signal });
+        const tRecvMs = Date.now();
+        const body    = await res.json();
+        if (res.ok && Number.isFinite(body?.server_utc_ms)) {
+          clockOffsetMsRef.current = clockOffsetMs({ tSendMs, tRecvMs, serverUtcMs: body.server_utc_ms });
+          log(`Clock offset vs server: ${clockOffsetMsRef.current.toFixed(0)} ms (+ = phone ahead)`);
+        }
+      } catch {
+        // Offline at the pool is normal. The offset is a diagnostic and never gates anything.
+      } finally {
+        clearTimeout(abortTimer);
+      }
+    })();
+
+    // One dump pass: drop any partial samples, re-probe the clock once, then write DUMP (before
+    // Phase 86-02 the subscription callback wrote it on the 8-byte reply). Used for retries. The
+    // device retains its buffer until CLEAR (Phase 74), so a re-issued META returns the same
+    // session and DUMP re-streams it in full —
     // no duplication, because the previous pass's partial samples are discarded here.
     // Declared as hoisted functions (not const arrows): they reference each other, and hoisting
     // keeps that mutual reference clean regardless of order.
     function sendDumpHandshake() {
       samplesRef.current = [];
       setSampleCount(0);
-      metaSeenRef.current = false;
+      probeGenRef.current += 1;   // any in-flight burst from the previous attempt is now stale
+      metaResolverRef.current = null;
       resetStallTimer();
-      writeCmd('META')
-        .then(() => log(`META re-sent (retry ${retrievalAttemptRef.current})`, 'ok'))
+      // ONE probe, then DUMP — the retry keeps its META-then-DUMP shape rather than re-running a
+      // burst. A successful retry probe joins the same array and the best is recomputed: a lower RTT
+      // is a free improvement, and the winner carries its own sessionStartUs.
+      const gen = probeGenRef.current;
+      probeOnce()
+        .then((p) => {
+          if (probeGenRef.current !== gen) return null;
+          if (p && p.sessionStartUs !== 0) {
+            clockProbesRef.current.push(p);
+            resolveSessionClock();
+          }
+          log(`META re-sent (retry ${retrievalAttemptRef.current})`, 'ok');
+          return writeCmd('DUMP');
+        })
         .catch(e => {
           log(`META retry write failed: ${e.message}`, 'error');
           finishRetrieval(true);
         });
+    }
+
+    // One META round trip. Arms the resolver the subscription callback routes replies to, stamps
+    // tSendMs, writes META, and resolves with the reply or null on timeout. A lost probe is SKIPPED,
+    // never fatal — AC-2: the clock can fail completely without costing the swim.
+    function probeOnce() {
+      return new Promise((resolve) => {
+        let done = false;
+        let timer = null;
+        const tSendMs = Date.now();
+        const handler = (reply) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ ...reply, tSendMs });
+        };
+        const giveUp = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          if (metaResolverRef.current === handler) metaResolverRef.current = null;
+          resolve(null);
+        };
+        timer = setTimeout(giveUp, META_PROBE_TIMEOUT_MS);
+        metaResolverRef.current = handler;
+        writeCmd('META').catch(giveUp);
+      });
+    }
+
+    // Best-of-N -> the corrected start, the diagnostics, and the GO marker. Called when the burst
+    // ends and again whenever a retry probe lands, so a lower RTT can only improve the answer.
+    function resolveSessionClock() {
+      const best = pickBestProbe(clockProbesRef.current);
+      let startPhoneMs;
+      if (best) {
+        startPhoneMs = sessionStartUtcMsFrom(best);
+        sessionStartUtcMsRef.current = startPhoneMs;
+        syncErrorMsRef.current       = syncErrorMsFrom(best);
+        const minRtt = probeRttMs(best);
+        log(`Clock: ${clockProbesRef.current.length}/${META_PROBE_COUNT} probes, min RTT `
+            + `${minRtt.toFixed(0)} ms — start corrected ${(minRtt / 2).toFixed(0)} ms earlier: `
+            + `sessionStartPhoneMs=${startPhoneMs.toFixed(0)} `
+            + `(${new Date(startPhoneMs).toISOString()})`, 'ok');
+      } else if (lastMetaReplyRef.current) {
+        // Every probe timed out but a reply did eventually land. Fall back to the pre-86-02
+        // UNCORRECTED formula purely so the in-app overlay still has a t=0 — the refs stay null, so
+        // nothing whose flight time we never measured is ever uploaded.
+        const stray = lastMetaReplyRef.current;
+        startPhoneMs = stray.tRecvMs - elapsedUs(stray.deviceNowUs, stray.sessionStartUs) / 1000;
+        log('Clock: no probe completed — uncorrected start used for the overlay only, '
+            + 'no clock fields will be sent', 'warn');
+      } else {
+        log('Clock: no META reply at all — no session start, no clock fields will be sent', 'warn');
+        return;
+      }
+      setSessionStartPhoneMs(startPhoneMs);
+
+      // GO marker -> session clock (Phase 84-02, moved here from the META handler so it resolves
+      // against the CORRECTED start). Behaviour is unchanged: dropped, not clamped, on a negative.
+      // go_signal_s shifts by ~rtt/2 — tens of ms, far below the coach's own thumb latency that the
+      // metric already embeds, so it changes nothing a reader should act on.
+      if (goPressPhoneMsRef.current != null) {
+        const g = (goPressPhoneMsRef.current - startPhoneMs) / 1000;
+        if (g >= 0) {
+          goSignalSRef.current = g;
+          log(`GO at ${g.toFixed(2)} s`, 'ok');
+        } else {
+          // Dropped, not clamped: a negative is a bad input, not a measurement.
+          goSignalSRef.current = null;
+          log(`GO resolved to ${g.toFixed(2)} s (before t=0) — dropped`, 'warn');
+        }
+      }
+    }
+
+    // The burst, then DUMP. The subscription callback no longer writes DUMP: the clock is measured
+    // across up to META_PROBE_COUNT round trips first. Bounded three ways — probe count, per-probe
+    // timeout, and a hard elapsed budget — so a dead link cannot stretch retrieval.
+    async function runProbeBurstThenDump() {
+      const gen = probeGenRef.current;
+      const t0  = Date.now();
+      for (let i = 0; i < META_PROBE_COUNT; i++) {
+        if (probeGenRef.current !== gen) return;              // a stalled retry took over
+        if (Date.now() - t0 > META_PROBE_BUDGET_MS) break;    // hard ceiling on a dead link
+        const p = await probeOnce();
+        if (probeGenRef.current !== gen) return;              // ...and a stale burst never writes DUMP
+        if (!p) continue;                                     // lost probe — skipped, not fatal
+        if (p.sessionStartUs === 0) {
+          // Checked on the FIRST reply, exactly as the pre-86-02 one-shot did, so the remaining
+          // probes are not burned on a device that has nothing to give.
+          log('META: no session buffered on device', 'warn');
+          probeGenRef.current += 1;
+          metaResolverRef.current = null;
+          subscriptionRef.current?.remove();
+          subscriptionRef.current = null;
+          clearTimeout(stallTimerRef.current);
+          Alert.alert('No Session', 'The device has no recorded session to retrieve.');
+          setBleState('ready');
+          return;
+        }
+        clockProbesRef.current.push(p);
+      }
+      if (probeGenRef.current !== gen) return;
+      // Never alert, never change bleState, never skip DUMP because of the clock.
+      resolveSessionClock();
+      writeCmd('DUMP').catch(e => {
+        log(`DUMP write failed: ${e.message}`, 'error');
+        finishRetrieval(true);
+      });
     }
 
     function resetStallTimer() {
@@ -454,49 +636,23 @@ export default function RecordScreen({ route, navigation }) {
           const buf = Buffer.from(characteristic.value, 'base64');
           resetStallTimer();
 
-          // META response — exactly 8 bytes (not a multiple of 7)
-          if (buf.length === META_SIZE && !metaSeenRef.current) {
-            metaSeenRef.current = true;
-            const phoneNowMs     = Date.now();
-            const sessionStartUs = buf.readUInt32LE(0);
-            const deviceNowUs    = buf.readUInt32LE(4);
-
-            if (sessionStartUs === 0) {
-              log('META: no session buffered on device', 'warn');
-              subscriptionRef.current?.remove();
-              subscriptionRef.current = null;
-              clearTimeout(stallTimerRef.current);
-              Alert.alert('No Session', 'The device has no recorded session to retrieve.');
-              setBleState('ready');
-              return;
-            }
-
-            // uint32 modular subtraction — device clock (micros) wraps at 2^32
-            const elapsedUs = (deviceNowUs - sessionStartUs + 2 ** 32) % 2 ** 32;
-            const startPhoneMs = phoneNowMs - elapsedUs / 1000;
-            setSessionStartPhoneMs(startPhoneMs);
-
-            // GO marker → session clock. startPhoneMs is encoder t=0 on the phone clock.
-            if (goPressPhoneMsRef.current != null) {
-              const g = (goPressPhoneMsRef.current - startPhoneMs) / 1000;
-              if (g >= 0) {
-                goSignalSRef.current = g;
-                log(`GO at ${g.toFixed(2)} s`, 'ok');
-              } else {
-                // Dropped, not clamped: a negative is a bad input, not a measurement.
-                goSignalSRef.current = null;
-                log(`GO resolved to ${g.toFixed(2)} s (before t=0) — dropped`, 'warn');
-              }
-            }
-
-            log(`META: session started ${(elapsedUs / 1e6).toFixed(2)} s ago — `
-                + `sessionStartPhoneMs=${startPhoneMs.toFixed(0)} `
-                + `(${new Date(startPhoneMs).toISOString()})`, 'ok');
-
-            writeCmd('DUMP').catch(e => {
-              log(`DUMP write failed: ${e.message}`, 'error');
-              finishRetrieval(true);
-            });
+          // META response — exactly 8 bytes (not a multiple of 7). Routed to whichever probe is
+          // waiting rather than handled inline: the clock is now measured across a burst of round
+          // trips (Phase 86-02). With no resolver armed this is a stray or duplicate META — it used
+          // to fall through to parsePacket and be discarded as a parse error, so returning here only
+          // makes that explicit. resetStallTimer() already fired above, so the burst keeps the
+          // Phase 74 stall timer alive.
+          if (buf.length === META_SIZE) {
+            const reply = {
+              tRecvMs:        Date.now(),
+              sessionStartUs: buf.readUInt32LE(0),
+              deviceNowUs:    buf.readUInt32LE(4),
+            };
+            if (reply.sessionStartUs !== 0) lastMetaReplyRef.current = reply;
+            const handler = metaResolverRef.current;
+            if (!handler) return;
+            metaResolverRef.current = null;
+            handler(reply);
             return;
           }
 
@@ -516,8 +672,10 @@ export default function RecordScreen({ route, navigation }) {
       );
 
       resetStallTimer();
-      await writeCmd('META');
-      log('META sent', 'ok');
+      log('META probe burst starting...', 'ok');
+      // Fire-and-forget: the burst awaits its own round trips and writes DUMP when it is done. Its
+      // failures are logged inside, never thrown out here — the swim does not depend on the clock.
+      runProbeBurstThenDump().catch(e => log(`Clock probe burst failed: ${e.message}`, 'warn'));
     } catch (e) {
       log(`Retrieval failed to start: ${e.message}`, 'error');
       subscriptionRef.current?.remove();
